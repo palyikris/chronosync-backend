@@ -37,7 +37,9 @@ class SupabaseDataService:
         # Build query joining timesheet_entries -> projects -> clients
         query = (
             supabase.table("timesheets")
-            .select("hours_logged, projects(name, client_id, clients(name))")
+            .select(
+                "hours_logged, projects(name, is_active, client_id, clients(name, is_active, invoice_attachment_language))"
+            )
             .eq("company_id", company_id)
         )
 
@@ -64,16 +66,30 @@ class SupabaseDataService:
             project_data = entry.get("projects") or {}
             client_data = project_data.get("clients") or {}
 
+            if project_data.get("is_active") is False:
+                continue
+
+            if client_data.get("is_active") is False:
+                continue
+
             client_code = (client_data.get("name") or "")[0:3].upper() if client_data.get("name") else "UNK"
             client_name = client_data.get("name") or "Unknown Client"
             project_name = project_data.get("name") or "General Task"
+            invoice_attachment_language = (
+                client_data.get("invoice_attachment_language") or "hu"
+            )
 
             if client_code not in clients_map:
                 clients_map[client_code] = {
                     "client_code": client_code,
                     "client_name": client_name,
+                    "invoice_attachment_language": invoice_attachment_language,
                     "projects_map": {},
                 }
+
+            clients_map[client_code][
+                "invoice_attachment_language"
+            ] = invoice_attachment_language
 
             # Accumulate hours for the project
             proj_map = clients_map[client_code]["projects_map"]
@@ -94,6 +110,9 @@ class SupabaseDataService:
                 {
                     "client_code": c_info["client_code"],
                     "client_name": c_info["client_name"],
+                    "invoice_attachment_language": c_info.get(
+                        "invoice_attachment_language", "hu"
+                    ),
                     "entries": formatted_entries,
                 }
             )

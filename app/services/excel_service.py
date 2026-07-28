@@ -8,6 +8,21 @@ from openpyxl.utils import get_column_letter
 
 
 class ExcelReportService:
+    TEXTS = {
+        "hu": {
+            "title": "Számlamelléklet (teljesítési igazolás)",
+            "statement": "Szerződésünk 4 pontja szerint csatoljuk az adott elszámolási időszakban igénybe vett tanácsadási szolgáltatásokról szóló kimutatást.",
+            "task": "Feladat",
+            "hours": "Időráfordítás (óra)",
+        },
+        "en": {
+            "title": "Invoice attachment (certificate of performance)",
+            "statement": "In accordance with clause 4 of our contract, we attach the statement of consulting services used during the given billing period.",
+            "task": "Task",
+            "hours": "Time spent (hours)",
+        },
+    }
+
     def __init__(self, logo_path: Optional[str] = None):
         """
         Initialize the service with an optional path to the Ecovis logo.
@@ -69,6 +84,8 @@ class ExcelReportService:
             client_code = report.get("client_code", "CLIENT")
             client_name = report.get("client_name", "")
             entries = report.get("entries", [])
+            language = str(report.get("invoice_attachment_language", "hu")).lower()
+            text = self.TEXTS.get(language, self.TEXTS["hu"])
 
             # Excel sheet tabs allow max 31 chars and prohibit special characters: \ / ? * : [ ]
             safe_title = client_code.translate(str.maketrans("", "", r"\/*?:[]"))[:30]
@@ -82,9 +99,7 @@ class ExcelReportService:
             c1.font = font_client_name
 
             # Row 2: Document Title
-            c2 = ws.cell(
-                row=2, column=1, value="Számlamelléklet (teljesítési igazolás)"
-            )
+            c2 = ws.cell(row=2, column=1, value=text["title"])
             c2.font = font_doc_title
 
             # Row 3: Period
@@ -95,13 +110,13 @@ class ExcelReportService:
             c4 = ws.cell(
                 row=4,
                 column=1,
-                value="Szerződésünk 4 pontja szerint csatoljuk az adott elszámolási időszakban igénybe vett tanácsadási szolgáltatásokról szóló kimutatást.",
+                value=text["statement"],
             )
             c4.font = font_body
 
             # Row 6: Table Header
-            hdr_a = ws.cell(row=6, column=1, value="Feladat")
-            hdr_b = ws.cell(row=6, column=2, value="Időráfordítás (óra)")
+            hdr_a = ws.cell(row=6, column=1, value=text["task"])
+            hdr_b = ws.cell(row=6, column=2, value=text["hours"])
 
             for hdr, align in [(hdr_a, align_left), (hdr_b, align_right)]:
                 hdr.font = font_header
@@ -110,7 +125,7 @@ class ExcelReportService:
 
             # Rows 7+: Data Entries
             current_row = 7
-            max_col1_len = len("Feladat")
+            max_col1_len = len(text["task"])
 
             for entry in entries:
                 project_name = entry.get("project_name", "")
