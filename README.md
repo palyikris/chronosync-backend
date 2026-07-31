@@ -142,11 +142,11 @@ Returns a simple JSON payload confirming that the service is running.
 
 - POST /api/v1/reports/generate-szamlamelleklet
 
-This endpoint accepts a request body with company selection, date range filters, and a period label. The backend then:
+This endpoint accepts a request body with client code selection, date range filters, and a period label. The backend then:
 
 1. extracts the Bearer token from the Authorization header,
 2. authenticates with Supabase using the supplied token,
-3. queries timesheet data for the selected company,
+3. queries timesheet data and keeps only entries for the selected client codes,
 4. aggregates hours by client and project,
 5. creates an Excel workbook with one sheet per client,
 6. returns the file as a downloadable attachment.
@@ -157,7 +157,7 @@ The request body expects the following structure:
 
 ```json
 {
-  "company_id": "123e4567-e89b-12d3-a456-426614174000",
+  "client_codes": ["COS", "ABC"],
   "start_date": "2026-01-01",
   "end_date": "2026-01-31",
   "period_text": "2026 január"
@@ -179,7 +179,7 @@ curl -X POST "http://localhost:8000/api/v1/reports/generate-szamlamelleklet" \
   -H "Authorization: Bearer <your-token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "company_id": "123e4567-e89b-12d3-a456-426614174000",
+    "client_codes": ["COS", "ABC"],
     "start_date": "2026-01-01",
     "end_date": "2026-01-31",
     "period_text": "2026 január"

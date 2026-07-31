@@ -12,12 +12,20 @@ class ExcelReportService:
         "hu": {
             "title": "Számlamelléklet (teljesítési igazolás)",
             "statement": "Szerződésünk 4 pontja szerint csatoljuk az adott elszámolási időszakban igénybe vett tanácsadási szolgáltatásokról szóló kimutatást.",
+            "used_hours_sum": "Felhasznált órák összege",
+            "available_hours": "Havi rendelkezésre álló óraszám",
+            "previous_hours": "Előző havi órakeret",
+            "difference": "Különbözet",
             "task": "Feladat",
             "hours": "Időráfordítás (óra)",
         },
         "en": {
             "title": "Invoice attachment (certificate of performance)",
             "statement": "In accordance with clause 4 of our contract, we attach the statement of consulting services used during the given billing period.",
+            "used_hours_sum": "Total used hours",
+            "available_hours": "Available hours per month",
+            "previous_hours": "Hours from previous month",
+            "difference": "Difference",
             "task": "Task",
             "hours": "Time spent (hours)",
         },
@@ -84,6 +92,12 @@ class ExcelReportService:
             client_code = report.get("client_code", "CLIENT")
             client_name = report.get("client_name", "")
             entries = report.get("entries", [])
+            available_hours_per_month = float(
+                report.get("available_hours_per_month", 0.0) or 0.0
+            )
+            hours_from_previous_month = float(
+                report.get("hours_from_previous_month", 0.0) or 0.0
+            )
             language = str(report.get("invoice_attachment_language", "hu")).lower()
             text = self.TEXTS.get(language, self.TEXTS["hu"])
 
@@ -114,6 +128,21 @@ class ExcelReportService:
             )
             c4.font = font_body
 
+            # Row 5: Client hour summary
+            summary_label_a = ws.cell(row=5, column=1, value=text["available_hours"])
+            summary_value_a = ws.cell(row=5, column=2, value=available_hours_per_month)
+            summary_label_b = ws.cell(row=5, column=3, value=text["previous_hours"])
+            summary_value_b = ws.cell(row=5, column=4, value=hours_from_previous_month)
+
+            for cell in [summary_label_a, summary_label_b]:
+                cell.font = font_body
+                cell.alignment = align_left
+
+            for cell in [summary_value_a, summary_value_b]:
+                cell.font = font_body
+                cell.alignment = align_right
+                cell.number_format = "0.0"
+
             # Row 6: Table Header
             hdr_a = ws.cell(row=6, column=1, value=text["task"])
             hdr_b = ws.cell(row=6, column=2, value=text["hours"])
@@ -126,6 +155,7 @@ class ExcelReportService:
             # Rows 7+: Data Entries
             current_row = 7
             max_col1_len = len(text["task"])
+            first_entry_row = current_row
 
             for entry in entries:
                 project_name = entry.get("project_name", "")
@@ -148,8 +178,80 @@ class ExcelReportService:
 
                 current_row += 1
 
+            summary_start_row = current_row
+            used_hours_row = summary_start_row
+            available_hours_row = summary_start_row + 1
+            previous_hours_row = summary_start_row + 2
+            difference_row = summary_start_row + 3
+
+            used_hours_label = ws.cell(
+                row=used_hours_row, column=1, value=text["used_hours_sum"]
+            )
+            used_hours_value = ws.cell(
+                row=used_hours_row,
+                column=2,
+                value=(
+                    f"=SUM(B{first_entry_row}:B{current_row - 1})"
+                    if current_row > first_entry_row
+                    else 0
+                ),
+            )
+
+            available_hours_label = ws.cell(
+                row=available_hours_row, column=1, value=text["available_hours"]
+            )
+            available_hours_value = ws.cell(
+                row=available_hours_row,
+                column=2,
+                value=available_hours_per_month,
+            )
+
+            previous_hours_label = ws.cell(
+                row=previous_hours_row, column=1, value=text["previous_hours"]
+            )
+            previous_hours_value = ws.cell(
+                row=previous_hours_row,
+                column=2,
+                value=hours_from_previous_month,
+            )
+
+            difference_label = ws.cell(
+                row=difference_row, column=1, value=text["difference"]
+            )
+            difference_value = ws.cell(
+                row=difference_row,
+                column=2,
+                value=f"=B{available_hours_row}-B{used_hours_row}+B{previous_hours_row}",
+            )
+
+            for cell in [
+                used_hours_label,
+                available_hours_label,
+                previous_hours_label,
+                difference_label,
+            ]:
+                cell.font = font_body
+                cell.alignment = align_left
+
+            for cell in [
+                used_hours_value,
+                available_hours_value,
+                previous_hours_value,
+                difference_value,
+            ]:
+                cell.font = font_body
+                cell.alignment = align_right
+                cell.number_format = "0.0"
+
             # Auto-adjust column widths based on content with padding
-            ws.column_dimensions["A"].width = max(max_col1_len + 5, 45)
+            ws.column_dimensions["A"].width = max(
+                max_col1_len + 5,
+                len(text["used_hours_sum"]) + 5,
+                len(text["available_hours"]) + 5,
+                len(text["previous_hours"]) + 5,
+                len(text["difference"]) + 5,
+                45,
+            )
             ws.column_dimensions["B"].width = 22
 
             # Embed Logo at the bottom

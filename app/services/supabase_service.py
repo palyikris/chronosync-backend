@@ -25,22 +25,24 @@ class SupabaseDataService:
     async def fetch_aggregated_timesheets(
         cls,
         user_jwt: str,
-        company_id: str,
+        client_codes: List[str],
         start_date: str,
         end_date: str,
     ) -> List[Dict[str, Any]]:
         """
-        Fetches timesheet entries for a company and aggregates hours by project for each client.
+        Fetches timesheet entries and aggregates hours by project for selected clients.
         """
+
         supabase = cls.get_authenticated_client(user_jwt)
+        requested_client_codes = {
+            code.strip().upper() for code in client_codes if code and code.strip()
+        }
+        if not requested_client_codes:
+            return []
 
         # Build query joining timesheet_entries -> projects -> clients
-        query = (
-            supabase.table("timesheets")
-            .select(
-                "hours_logged, projects(name, is_active, client_id, clients(name, is_active, invoice_attachment_language))"
-            )
-            .eq("company_id", company_id)
+        query = supabase.table("timesheets").select(
+            "hours_logged, projects(name, is_active, client_id, clients(client_code, name, is_active, invoice_attachment_language, available_hours_per_month, hours_from_previous_month))"
         )
 
         if start_date:
@@ -64,32 +66,62 @@ class SupabaseDataService:
             entry = cast(Dict[str, Any], entry)
             hours = entry.get("hours_logged") or 0.0
             project_data = entry.get("projects") or {}
-            client_data = project_data.get("clients") or {}
-
-            if project_data.get("is_active") is False:
+            if not isinstance(project_data, dict):
                 continue
+
+            client_data = project_data.get("clients") or {}
+            if not isinstance(client_data, dict):
+                continue
+
+            client_id = project_data.get("client_id")
 
             if client_data.get("is_active") is False:
                 continue
 
-            client_code = (client_data.get("name") or "")[0:3].upper() if client_data.get("name") else "UNK"
+            client_code = (client_data.get("client_code") or "").strip().upper()
+            if not client_code:
+                continue
+
+            if client_code not in requested_client_codes:
+                continue
+
             client_name = client_data.get("name") or "Unknown Client"
-            project_name = project_data.get("name") or "General Task"
             invoice_attachment_language = (
                 client_data.get("invoice_attachment_language") or "hu"
+            )
+            available_hours_per_month = float(
+                client_data.get("available_hours_per_month") or 0.0
+            )
+            hours_from_previous_month = float(
+                client_data.get("hours_from_previous_month") or 0.0
             )
 
             if client_code not in clients_map:
                 clients_map[client_code] = {
+                    "client_id": client_id,
                     "client_code": client_code,
                     "client_name": client_name,
                     "invoice_attachment_language": invoice_attachment_language,
+                    "available_hours_per_month": available_hours_per_month,
+                    "hours_from_previous_month": hours_from_previous_month,
                     "projects_map": {},
                 }
 
             clients_map[client_code][
                 "invoice_attachment_language"
             ] = invoice_attachment_language
+            clients_map[client_code][
+                "available_hours_per_month"
+            ] = available_hours_per_month
+            clients_map[client_code][
+                "hours_from_previous_month"
+            ] = hours_from_previous_month
+            clients_map[client_code]["client_id"] = client_id
+
+            if project_data.get("is_active") is False:
+                continue
+
+            project_name = project_data.get("name") or "General Task"
 
             # Accumulate hours for the project
             proj_map = clients_map[client_code]["projects_map"]
@@ -98,6 +130,16 @@ class SupabaseDataService:
         # Transform aggregated dict into structured list for Excel Service
         aggregated_reports = []
         for client_code, c_info in clients_map.items():
+            if not c_info["projects_map"]:
+                continue
+
+            total_logged_hours = round(sum(c_info["projects_map"].values()), 2)
+            difference_hours = round(
+                c_info.get("available_hours_per_month", 0.0)
+                - total_logged_hours
+                + c_info.get("hours_from_previous_month", 0.0),
+                2,
+            )
             formatted_entries = [
                 {"project_name": proj, "hours": round(total_hrs, 2)}
                 for proj, total_hrs in c_info["projects_map"].items()
@@ -110,9 +152,18 @@ class SupabaseDataService:
                 {
                     "client_code": c_info["client_code"],
                     "client_name": c_info["client_name"],
+                    "client_id": c_info.get("client_id"),
                     "invoice_attachment_language": c_info.get(
                         "invoice_attachment_language", "hu"
                     ),
+                    "used_hours": total_logged_hours,
+                    "available_hours_per_month": round(
+                        c_info.get("available_hours_per_month", 0.0), 2
+                    ),
+                    "hours_from_previous_month": round(
+                        c_info.get("hours_from_previous_month", 0.0), 2
+                    ),
+                    "difference_hours": difference_hours,
                     "entries": formatted_entries,
                 }
             )
@@ -120,3 +171,22 @@ class SupabaseDataService:
         # Sort sheets by client code alphabetically
         aggregated_reports.sort(key=lambda x: x["client_code"])
         return aggregated_reports
+
+    @classmethod
+    async def update_remaining_hours_from_reports(
+        cls, user_jwt: str, client_reports: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Updates each client's hours_from_previous_month to the newly calculated difference.
+        """
+        supabase = cls.get_authenticated_client(user_jwt)
+
+        for report in client_reports:
+            client_id = report.get("client_id")
+            if not client_id:
+                continue
+
+            difference_hours = float(report.get("difference_hours") or 0.0)
+            supabase.table("clients").update(
+                {"hours_from_previous_month": difference_hours}
+            ).eq("id", client_id).execute()

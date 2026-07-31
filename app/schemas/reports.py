@@ -1,9 +1,10 @@
 from pydantic import BaseModel, Field
-from typing import Optional
-
+from typing import List, Optional
 
 class SzamlamellekletRequest(BaseModel):
-    company_id: str = Field(..., description="UUID of the target company")
+    client_codes: List[str] = Field(
+        ..., min_length=1, description="List of target client codes (e.g. COS, ABC)"
+    )
     start_date: Optional[str] = Field(
         default=None, description="ISO start date filter"
     )

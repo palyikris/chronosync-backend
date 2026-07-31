@@ -32,7 +32,7 @@ async def generate_szamlamelleklet(
     # Fetch and aggregate data from Supabase
     client_reports = await SupabaseDataService.fetch_aggregated_timesheets(
         user_jwt=token,
-        company_id=payload.company_id,
+        client_codes=payload.client_codes,
         start_date=payload.start_date or "",
         end_date=payload.end_date or "",
     )
@@ -40,12 +40,16 @@ async def generate_szamlamelleklet(
     if not client_reports:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="A megadott időszakban nem található rögzített munkaóra a céghez.",
+            detail="A megadott időszakban nem található rögzített munkaóra a kiválasztott kliensekhez.",
         )
 
     # Generate Excel stream
     excel_file = excel_service.generate_szamlamelleklet(
         client_reports=client_reports, period_text=payload.period_text
+    )
+
+    await SupabaseDataService.update_remaining_hours_from_reports(
+        user_jwt=token, client_reports=client_reports
     )
 
     filename = f"szamlamelleklet_{payload.period_text.replace(' ', '_')}.xlsx"
