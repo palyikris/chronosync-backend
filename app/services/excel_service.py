@@ -262,13 +262,6 @@ class ExcelReportService:
             previous_hours_row = summary_start_row + 2
             difference_row = summary_start_row + 3
 
-            summary_header = ws.cell(row=summary_header_row, column=1, value="Summary")
-            summary_header.font = font_summary_label
-            summary_header.fill = fill_summary
-            summary_header.alignment = align_left
-            summary_header.border = thin_border
-            ws.cell(row=summary_header_row, column=2, value="").fill = fill_summary
-
             used_hours_label = ws.cell(
                 row=used_hours_row, column=1, value=text["used_hours_sum"]
             )
