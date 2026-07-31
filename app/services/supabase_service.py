@@ -1,8 +1,15 @@
-from typing import List, Dict, Any, cast
-from supabase import create_client, Client
+import logging
+import tempfile
+import urllib.parse
+from typing import List, Dict, Any, Optional, cast
+
+import httpx
 from fastapi import HTTPException, status
+from supabase import Client, create_client
+
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
 
 class SupabaseDataService:
     @staticmethod
@@ -20,6 +27,79 @@ class SupabaseDataService:
         client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
         client.postgrest.auth(user_jwt)
         return client
+
+    @staticmethod
+    def _detect_image_extension(file_bytes: bytes) -> str:
+        if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if file_bytes.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        if file_bytes.startswith((b"GIF87a", b"GIF89a")):
+            return ".gif"
+        if file_bytes.startswith(b"<svg") or b"<svg" in file_bytes[:100]:
+            return ".svg"
+        return ".png"
+
+    @staticmethod
+    def _write_temp_logo(file_bytes: bytes, extension: str) -> Optional[str]:
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=extension
+            ) as tmp_file:
+                tmp_file.write(file_bytes)
+                return tmp_file.name
+        except IOError as exc:
+            logger.error("Failed to write temporary logo file: %s", exc)
+            return None
+
+    @classmethod
+    async def fetch_company_logo_path(
+        cls, user_jwt: str, company_id: str
+    ) -> Optional[str]:
+        """Download a company logo from Supabase Storage and persist it as a temp file."""
+        if not company_id:
+            return None
+
+        supabase_url = getattr(settings, "SUPABASE_URL", None)
+        supabase_key = getattr(settings, "SUPABASE_ANON_KEY", None)
+        if not supabase_url or not supabase_key:
+            logger.error("Supabase credentials missing for logo download.")
+            return None
+
+        normalized_company_id = str(company_id).strip("/")
+        relative_path = f"{normalized_company_id}/logo/current"
+        encoded_path = urllib.parse.quote(relative_path, safe="/")
+        download_url = (
+            f"{supabase_url.rstrip('/')}/storage/v1/object/company-logos/{encoded_path}"
+        )
+        logger.debug("Attempting logo download from: %s", download_url)
+
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {user_jwt}",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(download_url, headers=headers)
+                response.raise_for_status()
+                file_bytes = response.content
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Supabase HTTP error: status=%d, response=%s",
+                exc.response.status_code,
+                exc.response.text,
+            )
+            return None
+        except httpx.RequestError as exc:
+            logger.error("Network error while downloading logo: %s", exc)
+            return None
+
+        if not file_bytes:
+            return None
+
+        extension = cls._detect_image_extension(file_bytes)
+        return cls._write_temp_logo(file_bytes, extension)
 
     @classmethod
     async def fetch_aggregated_timesheets(
@@ -42,7 +122,7 @@ class SupabaseDataService:
 
         # Build query joining timesheet_entries -> projects -> clients
         query = supabase.table("timesheets").select(
-            "hours_logged, projects(name, is_active, client_id, clients(client_code, name, is_active, invoice_attachment_language, available_hours_per_month, hours_from_previous_month))"
+            "hours_logged, projects(name, is_active, client_id, clients(client_code, name, company_id, is_active, invoice_attachment_language, available_hours_per_month, hours_from_previous_month))"
         )
 
         if start_date:
@@ -74,6 +154,7 @@ class SupabaseDataService:
                 continue
 
             client_id = project_data.get("client_id")
+            company_id = client_data.get("company_id")
 
             if client_data.get("is_active") is False:
                 continue
@@ -98,6 +179,7 @@ class SupabaseDataService:
 
             if client_code not in clients_map:
                 clients_map[client_code] = {
+                    "company_id": company_id,
                     "client_id": client_id,
                     "client_code": client_code,
                     "client_name": client_name,
@@ -116,6 +198,7 @@ class SupabaseDataService:
             clients_map[client_code][
                 "hours_from_previous_month"
             ] = hours_from_previous_month
+            clients_map[client_code]["company_id"] = company_id
             clients_map[client_code]["client_id"] = client_id
 
             if project_data.get("is_active") is False:
@@ -150,6 +233,7 @@ class SupabaseDataService:
 
             aggregated_reports.append(
                 {
+                    "company_id": c_info.get("company_id"),
                     "client_code": c_info["client_code"],
                     "client_name": c_info["client_name"],
                     "client_id": c_info.get("client_id"),

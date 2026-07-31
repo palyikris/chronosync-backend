@@ -5,7 +5,6 @@ from app.services.supabase_service import SupabaseDataService
 from app.services.excel_service import ExcelReportService
 
 router = APIRouter()
-excel_service = ExcelReportService()
 
 
 def extract_bearer_token(
@@ -44,8 +43,11 @@ async def generate_szamlamelleklet(
         )
 
     # Generate Excel stream
-    excel_file = excel_service.generate_szamlamelleklet(
-        client_reports=client_reports, period_text=payload.period_text
+    excel_service = ExcelReportService()
+    excel_file = await excel_service.generate_szamlamelleklet(
+        client_reports=client_reports,
+        period_text=payload.period_text,
+        user_jwt=token,
     )
 
     await SupabaseDataService.update_remaining_hours_from_reports(
