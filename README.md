@@ -27,6 +27,7 @@ This makes the backend a bridge between operational data in Supabase and busines
 - Excel report generation with client-specific sheets
 - Language-aware document text for Hungarian and English output
 - Streaming of generated Excel files for direct download
+- Encrypted, multi-provider invoice credential configuration
 - Health endpoint for service availability checks
 
 ## Architecture
@@ -44,8 +45,10 @@ The project is structured around a small set of clearly separated responsibiliti
 - [app/main.py](app/main.py): application initialization, CORS configuration, and router registration
 - [app/api/v1/router.py](app/api/v1/router.py): registers API version 1 routes
 - [app/api/v1/endpoints/reports.py](app/api/v1/endpoints/reports.py): report generation endpoint and request handling
+- [app/api/v1/endpoints/company.py](app/api/v1/endpoints/company.py): company invoice provider settings
 - [app/services/supabase_service.py](app/services/supabase_service.py): communication with Supabase and data aggregation
 - [app/services/excel_service.py](app/services/excel_service.py): Excel workbook generation and formatting
+- [app/services/invoice_providers/](app/services/invoice_providers/): provider interface, factory, and adapters
 - [app/schemas/reports.py](app/schemas/reports.py): request model for report generation
 - [app/core/config.py](app/core/config.py): environment-based configuration loader
 
@@ -102,6 +105,7 @@ The backend expects the following environment variables to be present in a `.env
 ```env
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
+ENCRYPTION_MASTER_KEY=<Fernet key generated for this server>
 ```
 
 These values are loaded by the configuration module and used to create the Supabase client used for data access.
@@ -163,6 +167,26 @@ The request body expects the following structure:
   "period_text": "2026 január"
 }
 ```
+
+### Configure invoice provider
+
+- GET `/api/v1/company/invoice-settings?company_id=<company-id>`
+- PUT `/api/v1/company/invoice-settings`
+
+The update payload accepts `szamlazz_hu` or `billingo`. The API key is write-only;
+the read endpoint returns only the selected provider and whether a key is configured.
+
+```json
+{
+  "company_id": "00000000-0000-0000-0000-000000000001",
+  "invoice_provider": "billingo",
+  "api_key": "provider-api-key"
+}
+```
+
+The `supabase/migrations/20260922000000_add_invoice_provider_settings.sql`
+migration adds the provider and encrypted credential columns and creates the
+RLS-scoped RPC used by the backend.
 
 ### Request headers
 
