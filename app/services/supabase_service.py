@@ -120,9 +120,10 @@ class SupabaseDataService:
         if not requested_client_codes:
             return []
 
-        # Build query joining timesheets -> projects -> clients
+        # Build query joining timesheets -> projects -> clients and preserve the
+        # task description stored on each timesheet row.
         query = supabase.table("timesheets").select(
-            "work_date, hours_logged, projects(name, is_active, client_id, clients(client_code, name, company_id, is_active, invoice_attachment_language, available_hours_per_month, hours_from_previous_month))"
+            "work_date, hours_logged, description, projects(name, is_active, client_id, clients(client_code, name, company_id, is_active, invoice_attachment_language, available_hours_per_month, hours_from_previous_month))"
         )
 
         if start_date:
@@ -206,6 +207,13 @@ class SupabaseDataService:
                 continue
 
             project_name = project_data.get("name") or "General Task"
+            task_description = (
+                entry.get("description")
+                or entry.get("task_description")
+                or entry.get("task_name")
+                or entry.get("task")
+                or project_name
+            )
 
             raw_hours = float(hours)
             raw_work_date = entry.get("work_date")
@@ -213,6 +221,7 @@ class SupabaseDataService:
             client_entries.append(
                 {
                     "project_name": project_name,
+                    "task_description": task_description,
                     "hours": round(raw_hours, 2),
                     "work_date": raw_work_date,
                 }
