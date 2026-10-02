@@ -346,7 +346,7 @@ class ExcelReportService:
             cell_diff_lbl.font = font_summary_lbl
             cell_diff_lbl.border = table_border
 
-            diff_formula = f"=D{total_used_row}-D{avail_row}+D{prev_row}"
+            diff_formula = f"=D{avail_row}-D{total_used_row}+D{prev_row}"
             cell_diff_val = ws.cell(row=diff_row, column=4, value=diff_formula)
             cell_diff_val.font = font_summary_val
             cell_diff_val.number_format = "0.00"
