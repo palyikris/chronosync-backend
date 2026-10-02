@@ -4,7 +4,7 @@
 
 ChronoSync Backend is a FastAPI-based service designed to support the operational and reporting needs of the ChronoSync platform. Its primary responsibility is to provide secure, authenticated access to company timesheet data and transform that data into professionally formatted Excel attachments for invoicing and client reporting purposes.
 
-The application is intentionally focused on a single, high-value business workflow: generating invoice attachment documents, commonly referred to as "számlamelléklet" in Hungarian, from aggregated timesheet data retrieved from Supabase. It combines modern API development practices, authentication-aware data access, and document generation into a compact and maintainable backend service.
+The application is intentionally focused on a single, high-value business workflow: generating invoice attachment documents, commonly referred to as "számlamelléklet" in Hungarian, from per-item timesheet data retrieved from Supabase. It combines modern API development practices, authentication-aware data access, and document generation into a compact and maintainable backend service.
 
 ## Purpose
 
@@ -12,7 +12,7 @@ At its core, this application enables a user to:
 
 - authenticate with a bearer token obtained from Supabase Auth,
 - retrieve timesheet and project data for a specific company,
-- aggregate work hours by client and project,
+- preserve each logged time item in the exported report,
 - generate an Excel workbook containing one sheet per client,
 - stream the resulting file back to the client application for download.
 
@@ -23,7 +23,7 @@ This makes the backend a bridge between operational data in Supabase and busines
 - FastAPI-based REST API with automatic OpenAPI documentation
 - Secure access through Bearer token validation
 - Supabase integration with Row Level Security (RLS) awareness
-- Aggregation of billed or logged hours by client and project
+- Per-item export of billed or logged hours by client
 - Excel report generation with client-specific sheets
 - Language-aware document text for Hungarian and English output
 - Streaming of generated Excel files for direct download
@@ -151,9 +151,11 @@ This endpoint accepts a request body with client code selection, date range filt
 1. extracts the Bearer token from the Authorization header,
 2. authenticates with Supabase using the supplied token,
 3. queries timesheet data and keeps only entries for the selected client codes,
-4. aggregates hours by client and project,
+4. preserves each logged item as a separate row in the workbook,
 5. creates an Excel workbook with one sheet per client,
 6. returns the file as a downloadable attachment.
+
+By default, the endpoint is read-only. If you also want to persist the newly calculated remaining hours back to Supabase, set `update_remaining_hours` to `true` in the request body.
 
 ## Request Payload
 
@@ -164,7 +166,8 @@ The request body expects the following structure:
   "client_codes": ["COS", "ABC"],
   "start_date": "2026-01-01",
   "end_date": "2026-01-31",
-  "period_text": "2026 január"
+  "period_text": "2026 január",
+  "update_remaining_hours": false
 }
 ```
 

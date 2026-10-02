@@ -14,3 +14,7 @@ class SzamlamellekletRequest(BaseModel):
     period_text: str = Field(
         "2026 január", description="Human-readable month string for sheet header"
     )
+    update_remaining_hours: bool = Field(
+        default=False,
+        description="When true, persist the newly calculated remaining hours back to Supabase after generating the workbook.",
+    )

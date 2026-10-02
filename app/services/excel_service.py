@@ -1,10 +1,11 @@
 import io
 import logging
 import os
-from typing import List, Dict, Any, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.drawing.image import Image
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from PIL import Image as PILImage
 
 from app.services.supabase_service import SupabaseDataService
@@ -17,29 +18,28 @@ class ExcelReportService:
         "hu": {
             "title": "Számlamelléklet (teljesítési igazolás)",
             "statement": "Szerződésünk 4 pontja szerint csatoljuk az adott elszámolási időszakban igénybe vett tanácsadási szolgáltatásokról szóló kimutatást.",
-            "used_hours_sum": "Felhasznált órák összege",
-            "available_hours": "Havi rendelkezésre álló óraszám",
-            "previous_hours": "Előző havi órakeret",
+            "used_hours_sum": "Felhasznált tanácsadói órák",
+            "available_hours": "Szerződés szerint rendelkezésre álló óraszám",
+            "previous_hours": "Korábbi időszaki órák",
             "difference": "Különbözet",
             "task": "Feladat",
             "hours": "Időráfordítás (óra)",
         },
         "en": {
-            "title": "Invoice attachment (certificate of performance)",
-            "statement": "In accordance with clause 4 of our contract, we attach the statement of consulting services used during the given billing period.",
-            "used_hours_sum": "Total used hours",
-            "available_hours": "Available hours per month",
-            "previous_hours": "Hours from previous month",
+            "title": "Invoice attachment (certificate of completion)",
+            "statement": "According to point 4 of our contract,we are attaching a statement of the consulting services used in the given accounting period.",
+            "used_hours_sum": "Used consulting hours",
+            "available_hours": "Contracted available hours",
+            "previous_hours": "Older period hours",
             "difference": "Difference",
-            "task": "Task",
+            "task": "Task description",
             "hours": "Time spent (hours)",
         },
     }
 
     def __init__(self, logo_path: Optional[str] = None):
-        """
-        Initialize the service with an optional path to the Ecovis logo.
-        """
+        """Initialize the service with an optional path to the Ecovis logo."""
+
         self.logo_path: Optional[str] = None
         self.set_logo_path(logo_path)
 
@@ -53,17 +53,24 @@ class ExcelReportService:
         return self
 
     def _resolve_logo_path(self, logo_path: Optional[str] = None) -> Optional[str]:
-        """Resolve the logo path lazily so late updates are picked up."""
-        if logo_path is not None:
+        """Resolve the logo path lazily."""
+
+        if logo_path is not None and os.path.exists(logo_path):
             return logo_path
-        if self.logo_path:
+        if self.logo_path and os.path.exists(self.logo_path):
             return self.logo_path
 
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base_dir, "assets", "ecovis_logo.png")
+        default_path = os.path.join(base_dir, "assets", "ecovis_logo.png")
+        if os.path.exists(default_path):
+            return default_path
+        return None
 
     @staticmethod
-    def _add_logo_to_sheet(ws, logo_path: Optional[str], row: int) -> None:
+    def _add_logo_to_sheet(
+        ws, logo_path: Optional[str], cell_anchor: str = "A1"
+    ) -> None:
+        """Adds company logo at the designated anchor cell matching reference dimensions."""
         if not logo_path or not os.path.exists(logo_path):
             logger.warning("No logo path available for sheet %s", ws.title)
             return
@@ -81,11 +88,13 @@ class ExcelReportService:
                 pil_img.save(image_bytes, format="PNG")
                 image_bytes.seek(0)
                 img = Image(image_bytes)
-                img.width = 220
-                img.height = 48
-                ws.add_image(img, f"A{row}")
-                ws.row_dimensions[row].height = 48
-                logger.info("Successfully added logo image to %s", ws.title)
+                # Exact dimensions matching szamlamelleklet_szeptember.xlsx
+                img.width = 724
+                img.height = 147
+                ws.add_image(img, cell_anchor)
+                logger.info(
+                    "Successfully added logo image to %s at %s", ws.title, cell_anchor
+                )
         except Exception as exc:
             logger.exception(
                 "Failed to add logo image to sheet %s from %s: %s",
@@ -97,54 +106,55 @@ class ExcelReportService:
     async def generate_szamlamelleklet(
         self,
         client_reports: List[Dict[str, Any]],
-        period_text: str = "2026 január",
+        period_text: Optional[str] = None,
+        issue_date_text: Optional[str] = None,
         user_jwt: Optional[str] = None,
     ) -> io.BytesIO:
         """
-        Generates a multi-sheet Excel workbook where each client has a dedicated sheet.
+        Generates a multi-sheet Excel workbook where each client has a dedicated sheet
+        matching the exact layout, granular per-entry listing, formulas, and visual styling
+        of szamlamelleklet_szeptember.xlsx.
         """
 
         wb = Workbook()
         wb.remove(wb.active)  # type: ignore
 
-        font_client_name = Font(name="Calibri", size=13, bold=True)
-        font_doc_title = Font(name="Calibri", size=14, bold=True)
-        font_period = Font(name="Calibri", size=12, bold=False)
-        font_body = Font(name="Calibri", size=11, bold=False)
-        font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-        font_summary_label = Font(name="Calibri", size=11, bold=True)
-        font_summary_value = Font(name="Calibri", size=11, bold=True)
+        # Typography & Color Palettes
+        font_client_name = Font(
+            name="Calibri", size=12, bold=False, italic=True, color="FFC00000"
+        )
+        font_doc_title = Font(name="Calibri", size=14, bold=True, italic=False)
+        font_period = Font(name="Calibri", size=11, bold=False, italic=False)
+        font_issue_date = Font(
+            name="Calibri", size=11, bold=False, italic=True, color="FFC00000"
+        )
+        font_body = Font(name="Calibri", size=11, bold=False, italic=False)
+        font_header = Font(name="Calibri", size=11, bold=True, italic=False)
+        font_summary_lbl = Font(name="Calibri", size=11, bold=True, italic=False)
+        font_summary_val = Font(name="Calibri", size=11, bold=False, italic=False)
 
         fill_header = PatternFill(
-            start_color="4F81BD", end_color="4F81BD", fill_type="solid"
-        )
-        fill_intro = PatternFill(
-            start_color="EAF3FB", end_color="EAF3FB", fill_type="solid"
-        )
-        fill_summary = PatternFill(
-            start_color="F7FAFC", end_color="F7FAFC", fill_type="solid"
-        )
-        fill_alt_row = PatternFill(
-            start_color="FAFCFE", end_color="FAFCFE", fill_type="solid"
+            start_color="FFF2F2F2", end_color="FFF2F2F2", fill_type="solid"
         )
 
-        align_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
-        align_right = Alignment(horizontal="right", vertical="center")
-        align_top_left = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        align_center = Alignment(horizontal="center")
+        align_right = Alignment(horizontal="right")
+        align_left = Alignment(horizontal="left")
+        align_wrap_left = Alignment(horizontal="left", wrap_text=True)
+        align_entry_task = Alignment(wrap_text=True)
 
-        thin_border_side = Side(border_style="thin", color="D9D9D9")
-        thin_border = Border(
-            left=thin_border_side,
-            right=thin_border_side,
-            top=thin_border_side,
-            bottom=thin_border_side,
+        gray_border_side = Side(border_style="thin", color="FF999999")
+        table_border = Border(
+            left=gray_border_side,
+            right=gray_border_side,
+            top=gray_border_side,
+            bottom=gray_border_side,
         )
-        medium_border_side = Side(border_style="medium", color="4F81BD")
-        medium_border = Border(
-            left=medium_border_side,
-            right=medium_border_side,
-            top=medium_border_side,
-            bottom=medium_border_side,
+        client_border = Border(bottom=Side(border_style="medium", color="FF000000"))
+
+        now = datetime.now()
+        effective_issue_date = (
+            issue_date_text or f"Budapest, {now.strftime('%Y. %m. %d.')}"
         )
 
         for report in client_reports:
@@ -171,189 +181,176 @@ class ExcelReportService:
                 )
                 if logo_path:
                     report["logo_path"] = logo_path
-                    logger.info(
-                        "Stored fetched logo path for sheet %s: %s",
-                        safe_title,
-                        logo_path,
-                    )
-                else:
-                    logger.warning(
-                        "No logo file returned for sheet %s (id=%s)",
-                        safe_title,
-                        logo_source_id,
-                    )
 
-            available_hours_per_month = float(
-                report.get("available_hours_per_month", 0.0) or 0.0
-            )
-            hours_from_previous_month = float(
-                report.get("hours_from_previous_month", 0.0) or 0.0
-            )
             language = str(report.get("invoice_attachment_language", "hu")).lower()
             text = self.TEXTS.get(language, self.TEXTS["hu"])
+
+            current_period = period_text
+            if not current_period:
+                current_period = (
+                    f"{now.year}. {now.month}. hónap"
+                    if language == "hu"
+                    else f"{now.year}-{now.month}"
+                )
 
             resolved_logo_path = self._resolve_logo_path(logo_path)
 
             ws = wb.create_sheet(title=safe_title)
-            ws.views.sheetView[0].showGridLines = True
 
-            for row_idx in range(1, 5):
-                ws.row_dimensions[row_idx].height = 22
+            # Column Dimensions (exact match)
+            ws.column_dimensions["A"].width = 10.0
+            ws.column_dimensions["C"].width = 90.0
+            ws.column_dimensions["D"].width = 21.0
+            ws.column_dimensions["E"].width = 10.0
 
-            intro_cells = [
-                ws.cell(row=1, column=1, value=client_name),
-                ws.cell(row=2, column=1, value=text["title"]),
-                ws.cell(row=3, column=1, value=period_text),
-                ws.cell(row=4, column=1, value=text["statement"]),
-            ]
-            for cell in intro_cells:
-                cell.alignment = align_top_left
-                cell.border = thin_border
-                cell.fill = fill_intro
+            # Row Heights (exact match)
+            ws.row_dimensions[1].height = 45.0
+            ws.row_dimensions[6].height = 15.5
+            ws.row_dimensions[10].height = 18.5
+            ws.row_dimensions[13].height = 29.0
 
-            intro_cells[0].font = font_client_name
-            intro_cells[1].font = font_doc_title
-            intro_cells[2].font = font_period
-            intro_cells[3].font = font_body
+            # Logo Placement at A1
+            if resolved_logo_path:
+                self._add_logo_to_sheet(ws, resolved_logo_path, "A1")
 
-            hdr_a = ws.cell(row=6, column=1, value=text["task"])
-            hdr_b = ws.cell(row=6, column=2, value=text["hours"])
-            for hdr, align in [(hdr_a, align_left), (hdr_b, align_right)]:
+            # Document Metadata Headers (Rows 6-13, Column C)
+            cell_c6 = ws.cell(row=6, column=3, value=client_name)
+            cell_c6.font = font_client_name
+            cell_c6.alignment = Alignment(horizontal="left", vertical="center")
+            cell_c6.border = client_border
+
+            cell_c10 = ws.cell(row=10, column=3, value=text["title"])
+            cell_c10.font = font_doc_title
+            cell_c10.alignment = align_wrap_left
+
+            cell_c11 = ws.cell(row=11, column=3, value=current_period)
+            cell_c11.font = font_period
+            cell_c11.alignment = align_wrap_left
+
+            cell_c12 = ws.cell(row=12, column=3, value=effective_issue_date)
+            cell_c12.font = font_issue_date
+            cell_c12.alignment = align_wrap_left
+
+            cell_c13 = ws.cell(row=13, column=3, value=text["statement"])
+            cell_c13.font = font_body
+            cell_c13.alignment = align_wrap_left
+
+            # Table Header (Row 16)
+            hdr_c16 = ws.cell(row=16, column=3, value=text["task"])
+            hdr_d16 = ws.cell(row=16, column=4, value=text["hours"])
+            for hdr in (hdr_c16, hdr_d16):
                 hdr.font = font_header
                 hdr.fill = fill_header
-                hdr.alignment = align
-                hdr.border = thin_border
+                hdr.alignment = align_center
+                hdr.border = table_border
 
-            ws.row_dimensions[6].height = 24
+            # Data Rows (Row 17+)
+            first_entry_row = 17
+            current_row = first_entry_row
 
-            current_row = 7
-            max_col1_len = len(text["task"])
-            first_entry_row = current_row
+            # Iterate over granular logged entries, not grouped projects
+            for entry in entries:
+                # Prefer entry-level description/task text; fallback to task or project name
+                task_description = (
+                    entry.get("task_description")
+                    or entry.get("description")
+                    or entry.get("task_name")
+                    or entry.get("task")
+                    or entry.get("project_name", "")
+                )
+                raw_hours = entry.get("hours", 0) or 0
+                hours_val = (
+                    int(raw_hours)
+                    if float(raw_hours).is_integer()
+                    else round(float(raw_hours), 2)
+                )
 
-            for idx, entry in enumerate(entries, start=1):
-                project_name = entry.get("project_name", "")
-                hours = entry.get("hours", 0.0)
+                cell_task = ws.cell(row=current_row, column=3, value=task_description)
+                cell_task.font = font_body
+                cell_task.alignment = align_entry_task
+                cell_task.border = table_border
 
-                cell_a = ws.cell(row=current_row, column=1, value=project_name)
-                cell_b = ws.cell(row=current_row, column=2, value=hours)
+                cell_hours = ws.cell(row=current_row, column=4, value=hours_val)
+                cell_hours.font = font_body
+                cell_hours.alignment = align_right
+                cell_hours.number_format = "0.00"
+                cell_hours.border = table_border
 
-                cell_a.font = font_body
-                cell_a.alignment = align_left
-                cell_a.border = thin_border
-                cell_b.font = font_body
-                cell_b.alignment = align_right
-                cell_b.number_format = "0.0"
-                cell_b.border = thin_border
-
-                if idx % 2 == 0:
-                    cell_a.fill = fill_alt_row
-                    cell_b.fill = fill_alt_row
-
-                if len(str(project_name)) > max_col1_len:
-                    max_col1_len = len(str(project_name))
-
-                ws.row_dimensions[current_row].height = 20
                 current_row += 1
 
-            summary_header_row = current_row
-            summary_start_row = summary_header_row + 1
-            used_hours_row = summary_start_row
-            available_hours_row = summary_start_row + 1
-            previous_hours_row = summary_start_row + 2
-            difference_row = summary_start_row + 3
+            last_entry_row = max(first_entry_row, current_row - 1)
 
-            used_hours_label = ws.cell(
-                row=used_hours_row, column=1, value=text["used_hours_sum"]
+            # Summary Rows (Always rendered unconditionally in the reference template)
+            total_used_row = current_row
+            cell_total_label = ws.cell(
+                row=total_used_row, column=3, value=text["used_hours_sum"]
             )
-            used_hours_value = ws.cell(
-                row=used_hours_row,
-                column=2,
-                value=(
-                    f"=SUM(B{first_entry_row}:B{current_row - 1})"
-                    if current_row > first_entry_row
-                    else 0
-                ),
+            cell_total_label.font = font_summary_lbl
+            cell_total_label.border = table_border
+
+            sum_formula = (
+                f"=SUM(D{first_entry_row}:D{last_entry_row})" if entries else 0
             )
+            cell_total_val = ws.cell(row=total_used_row, column=4, value=sum_formula)
+            cell_total_val.font = font_summary_val
+            cell_total_val.number_format = "0.00"
+            cell_total_val.border = table_border
 
-            available_hours_label = ws.cell(
-                row=available_hours_row, column=1, value=text["available_hours"]
-            )
-            available_hours_value = ws.cell(
-                row=available_hours_row, column=2, value=available_hours_per_month
-            )
-
-            previous_hours_label = ws.cell(
-                row=previous_hours_row, column=1, value=text["previous_hours"]
-            )
-            previous_hours_value = ws.cell(
-                row=previous_hours_row, column=2, value=hours_from_previous_month
-            )
-
-            difference_label = ws.cell(
-                row=difference_row, column=1, value=text["difference"]
-            )
-            difference_value = ws.cell(
-                row=difference_row,
-                column=2,
-                value=f"=B{available_hours_row}-B{used_hours_row}+B{previous_hours_row}",
-            )
-
-            for cell in [
-                used_hours_label,
-                available_hours_label,
-                previous_hours_label,
-                difference_label,
-            ]:
-                cell.font = font_summary_label
-                cell.alignment = align_left
-                cell.fill = fill_summary
-                cell.border = thin_border
-
-            for cell in [
-                used_hours_value,
-                available_hours_value,
-                previous_hours_value,
-                difference_value,
-            ]:
-                cell.font = font_summary_value
-                cell.alignment = align_right
-                cell.number_format = "0.0"
-                cell.fill = fill_summary
-                cell.border = thin_border
-
-            ws.column_dimensions["A"].width = max(
-                max_col1_len + 5,
-                len(text["used_hours_sum"]) + 5,
-                len(text["available_hours"]) + 5,
-                len(text["previous_hours"]) + 5,
-                len(text["difference"]) + 5,
-                45,
-            )
-            ws.column_dimensions["B"].width = 18
-
-            for row_idx in range(1, difference_row + 1):
-                ws.cell(row=row_idx, column=1).alignment = align_left
-                ws.cell(row=row_idx, column=2).alignment = align_right
-
-            for row_idx in range(1, difference_row + 1):
-                if row_idx in {1, 2, 3, 4, 6, summary_header_row}:
-                    ws.cell(row=row_idx, column=1).border = thin_border
-                    ws.cell(row=row_idx, column=2).border = thin_border
-
-            for border_row in range(6, difference_row + 1):
-                ws.cell(row=border_row, column=1).border = thin_border
-                ws.cell(row=border_row, column=2).border = thin_border
-
-            ws.cell(row=summary_header_row, column=1).border = medium_border
-            ws.cell(row=summary_header_row, column=2).border = medium_border
-
-            if resolved_logo_path:
-                logger.info(
-                    "Attempting to add logo to sheet %s from %s",
-                    safe_title,
-                    resolved_logo_path,
+            # Contracted Available Hours
+            raw_available = report.get("available_hours_per_month")
+            available_val = (
+                0
+                if raw_available is None
+                else (
+                    int(raw_available)
+                    if float(raw_available).is_integer()
+                    else float(raw_available)
                 )
-                self._add_logo_to_sheet(ws, resolved_logo_path, difference_row + 2)
+            )
+            avail_row = total_used_row + 1
+            cell_avail_lbl = ws.cell(
+                row=avail_row, column=3, value=text["available_hours"]
+            )
+            cell_avail_lbl.font = font_summary_lbl
+            cell_avail_lbl.border = table_border
+
+            cell_avail_val = ws.cell(row=avail_row, column=4, value=available_val)
+            cell_avail_val.font = font_summary_val
+            cell_avail_val.number_format = "0.00"
+            cell_avail_val.border = table_border
+
+            # Older Period Hours
+            raw_prev = report.get("hours_from_previous_month")
+            previous_val = (
+                0
+                if raw_prev is None
+                else (
+                    int(raw_prev) if float(raw_prev).is_integer() else float(raw_prev)
+                )
+            )
+            prev_row = avail_row + 1
+            cell_prev_lbl = ws.cell(
+                row=prev_row, column=3, value=text["previous_hours"]
+            )
+            cell_prev_lbl.font = font_summary_lbl
+            cell_prev_lbl.border = table_border
+
+            cell_prev_val = ws.cell(row=prev_row, column=4, value=previous_val)
+            cell_prev_val.font = font_summary_val
+            cell_prev_val.number_format = "0.00"
+            cell_prev_val.border = table_border
+
+            # Difference Formula Row
+            diff_row = prev_row + 1
+            cell_diff_lbl = ws.cell(row=diff_row, column=3, value=text["difference"])
+            cell_diff_lbl.font = font_summary_lbl
+            cell_diff_lbl.border = table_border
+
+            diff_formula = f"=D{total_used_row}-D{avail_row}+D{prev_row}"
+            cell_diff_val = ws.cell(row=diff_row, column=4, value=diff_formula)
+            cell_diff_val.font = font_summary_val
+            cell_diff_val.number_format = "0.00"
+            cell_diff_val.border = table_border
 
         file_stream = io.BytesIO()
         wb.save(file_stream)

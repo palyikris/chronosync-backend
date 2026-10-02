@@ -25,9 +25,10 @@ async def generate_szamlamelleklet(
     """
     1. Extracts Supabase User JWT from Auth header.
     2. Queries Supabase using RLS-scoped user client.
-    3. Aggregates logged hours per client and project.
+    3. Collects logged hours per client as individual time entries.
     4. Generates multi-sheet Excel file and streams it to the user.
     """
+
     # Fetch and aggregate data from Supabase
     client_reports = await SupabaseDataService.fetch_aggregated_timesheets(
         user_jwt=token,
@@ -50,9 +51,10 @@ async def generate_szamlamelleklet(
         user_jwt=token,
     )
 
-    await SupabaseDataService.update_remaining_hours_from_reports(
-        user_jwt=token, client_reports=client_reports
-    )
+    if payload.update_remaining_hours:
+        await SupabaseDataService.update_remaining_hours_from_reports(
+            user_jwt=token, client_reports=client_reports
+        )
 
     filename = f"szamlamelleklet_{payload.period_text.replace(' ', '_')}.xlsx"
 

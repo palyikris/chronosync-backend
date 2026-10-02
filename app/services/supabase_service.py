@@ -110,7 +110,7 @@ class SupabaseDataService:
         end_date: str,
     ) -> List[Dict[str, Any]]:
         """
-        Fetches timesheet entries and aggregates hours by project for selected clients.
+        Fetches timesheet entries and returns them per logged item for selected clients.
         """
 
         supabase = cls.get_authenticated_client(user_jwt)
@@ -120,9 +120,9 @@ class SupabaseDataService:
         if not requested_client_codes:
             return []
 
-        # Build query joining timesheet_entries -> projects -> clients
+        # Build query joining timesheets -> projects -> clients
         query = supabase.table("timesheets").select(
-            "hours_logged, projects(name, is_active, client_id, clients(client_code, name, company_id, is_active, invoice_attachment_language, available_hours_per_month, hours_from_previous_month))"
+            "work_date, hours_logged, projects(name, is_active, client_id, clients(client_code, name, company_id, is_active, invoice_attachment_language, available_hours_per_month, hours_from_previous_month))"
         )
 
         if start_date:
@@ -136,7 +136,7 @@ class SupabaseDataService:
         if not raw_entries:
             return []
 
-        # Data Aggregation Engine: Group by Client Code -> Project Name -> Sum(Hours)
+        # Group by client while keeping each raw timesheet row as an individual entry.
         clients_map: Dict[str, Dict[str, Any]] = {}
 
         for entry in raw_entries:
@@ -186,7 +186,8 @@ class SupabaseDataService:
                     "invoice_attachment_language": invoice_attachment_language,
                     "available_hours_per_month": available_hours_per_month,
                     "hours_from_previous_month": hours_from_previous_month,
-                    "projects_map": {},
+                    "entries": [],
+                    "used_hours": 0.0,
                 }
 
             clients_map[client_code][
@@ -206,32 +207,41 @@ class SupabaseDataService:
 
             project_name = project_data.get("name") or "General Task"
 
-            # Accumulate hours for the project
-            proj_map = clients_map[client_code]["projects_map"]
-            proj_map[project_name] = proj_map.get(project_name, 0.0) + float(hours)
+            raw_hours = float(hours)
+            raw_work_date = entry.get("work_date")
+            client_entries = clients_map[client_code]["entries"]
+            client_entries.append(
+                {
+                    "project_name": project_name,
+                    "hours": round(raw_hours, 2),
+                    "work_date": raw_work_date,
+                }
+            )
+            clients_map[client_code]["used_hours"] = round(
+                float(clients_map[client_code]["used_hours"]) + raw_hours, 2
+            )
 
-        # Transform aggregated dict into structured list for Excel Service
-        aggregated_reports = []
+        # Transform grouped client data into a structured list for Excel Service.
+        report_rows = []
         for client_code, c_info in clients_map.items():
-            if not c_info["projects_map"]:
+            if not c_info["entries"]:
                 continue
 
-            total_logged_hours = round(sum(c_info["projects_map"].values()), 2)
+            entries = sorted(
+                c_info["entries"],
+                key=lambda item: (
+                    str(item.get("work_date") or ""),
+                    str(item.get("project_name") or ""),
+                ),
+            )
+            total_logged_hours = round(float(c_info.get("used_hours") or 0.0), 2)
             difference_hours = round(
                 c_info.get("available_hours_per_month", 0.0)
                 - total_logged_hours
                 + c_info.get("hours_from_previous_month", 0.0),
                 2,
             )
-            formatted_entries = [
-                {"project_name": proj, "hours": round(total_hrs, 2)}
-                for proj, total_hrs in c_info["projects_map"].items()
-            ]
-
-            # Sort entries alphabetically by project name
-            formatted_entries.sort(key=lambda x: x["project_name"])
-
-            aggregated_reports.append(
+            report_rows.append(
                 {
                     "company_id": c_info.get("company_id"),
                     "client_code": c_info["client_code"],
@@ -248,13 +258,13 @@ class SupabaseDataService:
                         c_info.get("hours_from_previous_month", 0.0), 2
                     ),
                     "difference_hours": difference_hours,
-                    "entries": formatted_entries,
+                    "entries": entries,
                 }
             )
 
         # Sort sheets by client code alphabetically
-        aggregated_reports.sort(key=lambda x: x["client_code"])
-        return aggregated_reports
+        report_rows.sort(key=lambda x: x["client_code"])
+        return report_rows
 
     @classmethod
     async def update_remaining_hours_from_reports(
