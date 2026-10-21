@@ -1,8 +1,13 @@
 import io
 import logging
+import math
 import os
-from datetime import datetime
+import re
+from calendar import monthrange
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
+
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -14,10 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 class ExcelReportService:
+    MAX_LOGO_PIXELS = 20_000_000
+    MAX_NORMALIZED_LOGO_SIZE = (1448, 294)
     TEXTS = {
         "hu": {
             "title": "Számlamelléklet (teljesítési igazolás)",
-            "statement": "Szerződésünk 4 pontja szerint csatoljuk az adott elszámolási időszakban igénybe vett tanácsadási szolgáltatásokról szóló kimutatást.",
+            "statement": "Szerződésünk 4. pontja szerint csatoljuk az adott elszámolási időszakban igénybe vett tanácsadási szolgáltatásokról szóló kimutatást.",
             "used_hours_sum": "Felhasznált tanácsadói órák",
             "available_hours": "Szerződés szerint rendelkezésre álló óraszám",
             "previous_hours": "Korábbi időszaki órák",
@@ -27,14 +34,44 @@ class ExcelReportService:
         },
         "en": {
             "title": "Invoice attachment (certificate of completion)",
-            "statement": "According to point 4 of our contract,we are attaching a statement of the consulting services used in the given accounting period.",
+            "statement": "According to point 4 of our contract, we are attaching a statement of the consulting services used in the given accounting period.",
             "used_hours_sum": "Used consulting hours",
             "available_hours": "Contracted available hours",
-            "previous_hours": "Older period hours",
+            "previous_hours": "Hours carried over from the previous period",
             "difference": "Difference",
             "task": "Task description",
             "hours": "Time spent (hours)",
         },
+    }
+    MONTH_NAMES = {
+        "hu": (
+            "január",
+            "február",
+            "március",
+            "április",
+            "május",
+            "június",
+            "július",
+            "augusztus",
+            "szeptember",
+            "október",
+            "november",
+            "december",
+        ),
+        "en": (
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ),
     }
 
     def __init__(self, logo_path: Optional[str] = None):
@@ -76,38 +113,139 @@ class ExcelReportService:
             return
 
         try:
-            with PILImage.open(logo_path) as pil_img:
-                logger.info(
-                    "Loaded logo image for %s: format=%s, size=%s",
-                    ws.title,
-                    pil_img.format,
-                    pil_img.size,
+            with open(logo_path, "rb") as logo_file:
+                ExcelReportService._add_logo_bytes_to_sheet(
+                    ws, logo_file.read(), cell_anchor
                 )
-                pil_img = pil_img.convert("RGBA")
-                image_bytes = io.BytesIO()
-                pil_img.save(image_bytes, format="PNG")
-                image_bytes.seek(0)
-                img = Image(image_bytes)
-                # Exact dimensions matching szamlamelleklet_szeptember.xlsx
-                img.width = 724
-                img.height = 147
-                ws.add_image(img, cell_anchor)
-                logger.info(
-                    "Successfully added logo image to %s at %s", ws.title, cell_anchor
-                )
-        except Exception as exc:
+        except OSError as exc:
             logger.exception(
-                "Failed to add logo image to sheet %s from %s: %s",
+                "Failed to read logo image for sheet %s from %s: %s",
                 ws.title,
                 logo_path,
                 exc,
             )
+
+    @classmethod
+    def _normalize_logo_bytes(cls, logo_bytes: bytes | None) -> bytes | None:
+        if not logo_bytes:
+            return None
+
+        try:
+            normalized_bytes = logo_bytes
+            if b"<svg" in logo_bytes[:512].lower():
+                try:
+                    import cairosvg
+                except ImportError:
+                    logger.warning(
+                        "SVG logo support is unavailable; omitting the company logo"
+                    )
+                    return None
+                normalized_bytes = cairosvg.svg2png(
+                    bytestring=logo_bytes,
+                    output_width=cls.MAX_NORMALIZED_LOGO_SIZE[0],
+                    output_height=cls.MAX_NORMALIZED_LOGO_SIZE[1],
+                    unsafe=False,
+                )
+
+            with PILImage.open(io.BytesIO(normalized_bytes)) as pil_img:
+                if pil_img.width * pil_img.height > cls.MAX_LOGO_PIXELS:
+                    raise ValueError("logo dimensions exceed the safe image limit")
+                pil_img.verify()
+            with PILImage.open(io.BytesIO(normalized_bytes)) as pil_img:
+                pil_img = pil_img.convert("RGBA")
+                pil_img.thumbnail(cls.MAX_NORMALIZED_LOGO_SIZE)
+                image_bytes = io.BytesIO()
+                pil_img.save(image_bytes, format="PNG")
+                return image_bytes.getvalue()
+        except Exception as exc:
+            logger.warning("Ignoring invalid company logo: %s", exc)
+            return None
+
+    @staticmethod
+    def _add_normalized_logo_to_sheet(
+        ws, normalized_logo_bytes: bytes | None, cell_anchor: str = "A1"
+    ) -> None:
+        if not normalized_logo_bytes:
+            return
+
+        try:
+            image_bytes = io.BytesIO(normalized_logo_bytes)
+            img = Image(image_bytes)
+            img.width = 724
+            img.height = 147
+            ws.add_image(img, cell_anchor)
+        except Exception as exc:
+            logger.warning("Ignoring invalid logo for sheet %s: %s", ws.title, exc)
+
+    @classmethod
+    def _add_logo_bytes_to_sheet(
+        cls, ws, logo_bytes: bytes | None, cell_anchor: str = "A1"
+    ) -> None:
+        cls._add_normalized_logo_to_sheet(
+            ws,
+            cls._normalize_logo_bytes(logo_bytes),
+            cell_anchor,
+        )
+
+    @staticmethod
+    def _safe_cell_text(value: Any) -> str:
+        text = str(value or "")
+        if text.lstrip().startswith(("=", "+", "-", "@")):
+            return f"'{text}"
+        return text
+
+    @staticmethod
+    def _safe_sheet_title(raw_title: Any, existing_titles: list[str]) -> str:
+        base = re.sub(r"[\\/*?:\[\]]", "", str(raw_title or "")).strip()
+        base = base[:31] or "Client"
+        existing = {title.casefold() for title in existing_titles}
+        candidate = base
+        suffix_number = 2
+        while candidate.casefold() in existing:
+            suffix = f" ({suffix_number})"
+            candidate = f"{base[: 31 - len(suffix)]}{suffix}"
+            suffix_number += 1
+        return candidate
+
+    @classmethod
+    def _format_period_text(
+        cls, start_date: date, end_date: date, language: str
+    ) -> str:
+        language = language if language in cls.MONTH_NAMES else "hu"
+        is_full_month = (
+            start_date.year == end_date.year
+            and start_date.month == end_date.month
+            and start_date.day == 1
+            and end_date.day == monthrange(start_date.year, start_date.month)[1]
+        )
+        if is_full_month:
+            month_name = cls.MONTH_NAMES[language][start_date.month - 1]
+            return (
+                f"{start_date.year}. {month_name}"
+                if language == "hu"
+                else f"{month_name} {start_date.year}"
+            )
+
+        if language == "hu":
+            return (
+                f"{start_date.year}. {start_date.month:02d}. {start_date.day:02d}. – "
+                f"{end_date.year}. {end_date.month:02d}. {end_date.day:02d}."
+            )
+
+        start_month = cls.MONTH_NAMES["en"][start_date.month - 1][:3]
+        end_month = cls.MONTH_NAMES["en"][end_date.month - 1][:3]
+        return (
+            f"{start_month} {start_date.day}, {start_date.year} – "
+            f"{end_month} {end_date.day}, {end_date.year}"
+        )
 
     async def generate_szamlamelleklet(
         self,
         client_reports: List[Dict[str, Any]],
         period_text: Optional[str] = None,
         issue_date_text: Optional[str] = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
         user_jwt: Optional[str] = None,
     ) -> io.BytesIO:
         """
@@ -118,6 +256,9 @@ class ExcelReportService:
 
         wb = Workbook()
         wb.remove(wb.active)  # type: ignore
+        wb.calculation.calcMode = "auto"
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
 
         # Typography & Color Palettes
         font_client_name = Font(
@@ -152,17 +293,19 @@ class ExcelReportService:
         )
         client_border = Border(bottom=Side(border_style="medium", color="FF000000"))
 
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("Europe/Budapest"))
         effective_issue_date = (
             issue_date_text or f"Budapest, {now.strftime('%Y. %m. %d.')}"
         )
+        company_logo_cache: dict[str, bytes | None] = {}
 
         for report in client_reports:
             client_code = report.get("client_code", "CLIENT")
-            safe_title = client_code.translate(str.maketrans("", "", r"\\/*?:[]"))[:30]
-            client_name = report.get("client_name", "")
+            safe_title = self._safe_sheet_title(client_code, wb.sheetnames)
+            client_name = self._safe_cell_text(report.get("client_name", ""))
             entries = report.get("entries", [])
             logo_path = report.get("logo_path")
+            logo_bytes: bytes | None = None
 
             logo_source_id = report.get("company_id")
             if not logo_source_id:
@@ -171,21 +314,25 @@ class ExcelReportService:
                     safe_title,
                 )
             if not logo_path and user_jwt and logo_source_id:
-                logger.info(
-                    "Attempting to fetch logo for sheet %s using company_id=%s",
-                    safe_title,
-                    logo_source_id,
-                )
-                logo_path = await SupabaseDataService.fetch_company_logo_path(
-                    user_jwt, str(logo_source_id)
-                )
-                if logo_path:
-                    report["logo_path"] = logo_path
+                logo_cache_key = str(logo_source_id)
+                if logo_cache_key not in company_logo_cache:
+                    company_logo_cache[logo_cache_key] = self._normalize_logo_bytes(
+                        await SupabaseDataService.fetch_company_logo_bytes(
+                            user_jwt,
+                            logo_cache_key,
+                        )
+                    )
+                logo_bytes = company_logo_cache[logo_cache_key]
 
             language = str(report.get("invoice_attachment_language", "hu")).lower()
             text = self.TEXTS.get(language, self.TEXTS["hu"])
 
-            current_period = period_text
+            if start_date and end_date:
+                current_period = self._format_period_text(
+                    start_date, end_date, language
+                )
+            else:
+                current_period = period_text
             if not current_period:
                 current_period = (
                     f"{now.year}. {now.month}. hónap"
@@ -212,6 +359,8 @@ class ExcelReportService:
             # Logo Placement at A1
             if resolved_logo_path:
                 self._add_logo_to_sheet(ws, resolved_logo_path, "A1")
+            elif logo_bytes:
+                self._add_normalized_logo_to_sheet(ws, logo_bytes, "A1")
 
             # Document Metadata Headers (Rows 6-13, Column C)
             cell_c6 = ws.cell(row=6, column=3, value=client_name)
@@ -223,11 +372,17 @@ class ExcelReportService:
             cell_c10.font = font_doc_title
             cell_c10.alignment = align_wrap_left
 
-            cell_c11 = ws.cell(row=11, column=3, value=current_period)
+            cell_c11 = ws.cell(
+                row=11, column=3, value=self._safe_cell_text(current_period)
+            )
             cell_c11.font = font_period
             cell_c11.alignment = align_wrap_left
 
-            cell_c12 = ws.cell(row=12, column=3, value=effective_issue_date)
+            cell_c12 = ws.cell(
+                row=12,
+                column=3,
+                value=self._safe_cell_text(effective_issue_date),
+            )
             cell_c12.font = font_issue_date
             cell_c12.alignment = align_wrap_left
 
@@ -265,7 +420,12 @@ class ExcelReportService:
                     else round(float(raw_hours), 2)
                 )
 
-                cell_task = ws.cell(row=current_row, column=3, value=task_description)
+                safe_task_description = self._safe_cell_text(task_description)
+                cell_task = ws.cell(
+                    row=current_row,
+                    column=3,
+                    value=safe_task_description,
+                )
                 cell_task.font = font_body
                 cell_task.alignment = align_entry_task
                 cell_task.border = table_border
@@ -275,6 +435,14 @@ class ExcelReportService:
                 cell_hours.alignment = align_right
                 cell_hours.number_format = "0.00"
                 cell_hours.border = table_border
+
+                estimated_lines = sum(
+                    max(1, math.ceil(len(line) / 90))
+                    for line in safe_task_description.splitlines() or [""]
+                )
+                ws.row_dimensions[current_row].height = min(
+                    409.0, max(15.0, estimated_lines * 15.0)
+                )
 
                 current_row += 1
 
@@ -351,6 +519,24 @@ class ExcelReportService:
             cell_diff_val.font = font_summary_val
             cell_diff_val.number_format = "0.00"
             cell_diff_val.border = table_border
+
+            # Keep each attachment printable at one page wide while allowing long
+            # entry lists to continue vertically with their table header repeated.
+            ws.sheet_view.showGridLines = False
+            ws.print_area = f"A1:E{diff_row}"
+            ws.print_title_rows = "16:16"
+            ws.page_setup.orientation = "landscape"
+            ws.page_setup.paperSize = ws.PAPERSIZE_A4
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 0
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.print_options.horizontalCentered = True
+            ws.page_margins.left = 0.25
+            ws.page_margins.right = 0.25
+            ws.page_margins.top = 0.5
+            ws.page_margins.bottom = 0.5
+            ws.page_margins.header = 0.2
+            ws.page_margins.footer = 0.2
 
         file_stream = io.BytesIO()
         wb.save(file_stream)

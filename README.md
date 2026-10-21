@@ -14,7 +14,7 @@ At its core, this application enables a user to:
 - retrieve timesheet and project data for a specific company,
 - preserve each logged time item in the exported report,
 - generate an Excel workbook containing one sheet per client,
-- stream the resulting file back to the client application for download.
+- return the resulting file to the client application for download.
 
 This makes the backend a bridge between operational data in Supabase and business documentation used in financial and client-facing workflows.
 
@@ -26,7 +26,7 @@ This makes the backend a bridge between operational data in Supabase and busines
 - Per-item export of billed or logged hours by client
 - Excel report generation with client-specific sheets
 - Language-aware document text for Hungarian and English output
-- Streaming of generated Excel files for direct download
+- Direct download responses for generated Excel files
 - Encrypted, multi-provider invoice credential configuration
 - Health endpoint for service availability checks
 
@@ -146,16 +146,19 @@ Returns a simple JSON payload confirming that the service is running.
 
 - POST /api/v1/reports/generate-szamlamelleklet
 
-This endpoint accepts a request body with client code selection, date range filters, and a period label. The backend then:
+This endpoint accepts a company-scoped request with immutable client IDs and an inclusive date range. The backend then:
 
 1. extracts the Bearer token from the Authorization header,
 2. authenticates with Supabase using the supplied token,
-3. queries timesheet data and keeps only entries for the selected client codes,
+3. queries every page of approved or already-invoiced timesheet data for the selected company and client IDs,
 4. preserves each logged item as a separate row in the workbook,
 5. creates an Excel workbook with one sheet per client,
 6. returns the file as a downloadable attachment.
 
-By default, the endpoint is read-only. If you also want to persist the newly calculated remaining hours back to Supabase, set `update_remaining_hours` to `true` in the request body.
+Only active company administrators (or super administrators) can use this
+endpoint. The database and API both verify company scope.
+
+By default, the endpoint is read-only. If you also want to persist the newly calculated remaining hours back to Supabase, set `update_remaining_hours` to `true` in the request body. Carry-over finalization is accepted only for one complete calendar month. It is recorded and applied transactionally, so retrying the same finalized period cannot compound the balance.
 
 ## Request Payload
 
@@ -163,10 +166,13 @@ The request body expects the following structure:
 
 ```json
 {
-  "client_codes": ["COS", "ABC"],
+  "company_id": "00000000-0000-0000-0000-000000000001",
+  "client_ids": [
+    "00000000-0000-0000-0000-000000000002",
+    "00000000-0000-0000-0000-000000000003"
+  ],
   "start_date": "2026-01-01",
   "end_date": "2026-01-31",
-  "period_text": "2026 január",
   "update_remaining_hours": false
 }
 ```
@@ -206,13 +212,18 @@ curl -X POST "http://localhost:8000/api/v1/reports/generate-szamlamelleklet" \
   -H "Authorization: Bearer <your-token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "client_codes": ["COS", "ABC"],
+    "company_id": "00000000-0000-0000-0000-000000000001",
+    "client_ids": ["00000000-0000-0000-0000-000000000002"],
     "start_date": "2026-01-01",
-    "end_date": "2026-01-31",
-    "period_text": "2026 január"
+    "end_date": "2026-01-31"
   }' \
   -o report.xlsx
 ```
+
+Before deploying this endpoint, apply
+`supabase/migrations/20261021000000_harden_invoice_attachment_finalization.sql`.
+It creates the RLS-protected period ledger used for accurate re-downloads and the
+authenticated transaction used to finalize all selected client balances atomically.
 
 ## Report Generation Details
 
