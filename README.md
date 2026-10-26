@@ -28,6 +28,8 @@ This makes the backend a bridge between operational data in Supabase and busines
 - Language-aware document text for Hungarian and English output
 - Direct download responses for generated Excel files
 - Encrypted, multi-provider invoice credential configuration
+- Számlázz.hu XML invoice preview generation
+- Manual invoice review, explicit live issuance, history and reconciliation
 - Health endpoint for service availability checks
 
 ## Architecture
@@ -109,6 +111,12 @@ ENCRYPTION_MASTER_KEY=<Fernet key generated for this server>
 ```
 
 These values are loaded by the configuration module and used to create the Supabase client used for data access.
+
+Copy `.env.example` to the ignored `.env` file for local development. Generate
+the Fernet encryption key locally and put it directly in that ignored file (or
+your deployment secret manager); do not print it into build logs or commit it.
+The invoice-settings API intentionally fails closed when the key is missing or
+invalid.
 
 ## Installation
 
@@ -196,6 +204,66 @@ the read endpoint returns only the selected provider and whether a key is config
 The `supabase/migrations/20260922000000_add_invoice_provider_settings.sql`
 migration adds the provider and encrypted credential columns and creates the
 RLS-scoped RPC used by the backend.
+
+The settings endpoint returns the saved public configuration as JSON. Provider
+keys remain write-only, are encrypted before persistence, and are never returned
+to the browser. Changing provider requires entering that provider's key.
+
+### Preview a Számlázz.hu invoice
+
+- POST `/api/v1/invoices/preview`
+- POST `/api/v1/invoices/client-preview`
+
+This first integration slice accepts validated invoice, customer, and line-item
+data and returns a PDF preview. The backend always forces the Számlázz.hu
+`elonezetpdf` flag and disables customer e-mail for this endpoint, so it does not
+create or send a live invoice. It uses the official `action-xmlagentxmlfile`
+multipart field, response version 2, and currency-aware line rounding.
+
+The implementation follows the official documentation for
+[request delivery](https://docs.szamlazz.hu/agent/generating_invoice/request),
+[XML/XSD structure](https://docs.szamlazz.hu/agent/generating_invoice/xml),
+[responses](https://docs.szamlazz.hu/agent/generating_invoice/response), and
+[rounding](https://docs.szamlazz.hu/agent/generating_invoice/rounding). It sends
+each request once; provider failures are not retried automatically.
+
+The client-preview endpoint is the product-facing path used by the Client
+Invoicing surface. It loads the RLS-scoped client billing profile from Supabase.
+For hourly billing, it sums only `approved` time entries in the inclusive period;
+entries already marked `invoiced` are excluded. Fixed-monthly profiles use a
+quantity of one. The endpoint then returns the preview PDF with `Cache-Control:
+no-store` and never changes a timesheet status.
+
+```json
+{
+  "company_id": "00000000-0000-0000-0000-000000000001",
+  "client_id": "00000000-0000-0000-0000-000000000002",
+  "period_start": "2026-09-01",
+  "period_end": "2026-09-30"
+}
+```
+
+### Review and manually issue an invoice
+
+- `POST /api/v1/invoices/client-review`
+- `POST /api/v1/invoices/client-issue`
+- `GET /api/v1/invoices/history?company_id=<company-id>`
+- `GET /api/v1/invoices/<invoice-id>/pdf?company_id=<company-id>`
+- `POST /api/v1/invoices/<invoice-id>/reconcile`
+
+The review endpoint returns the recipient, quantity, tax, net/gross totals and
+the exact approved timesheets included in the invoice. Live issuance requires
+the returned review fingerprint plus `"confirm": true`. The
+`20261022140000_create_manual_invoice_ledger.sql` migration reserves each
+company/client/period once and snapshots its timesheets before the provider call.
+After a confirmed Számlázz.hu response, one database function stores the invoice
+number/PDF and changes only those captured `approved` timesheets to `invoiced`.
+
+Provider rejection records a retryable failed attempt. Network or incomplete
+responses are recorded as `uncertain`, remain locked against retries, and require
+an administrator to check the ledger external ID in Számlázz.hu before using the
+explicit reconciliation endpoint. No scheduler or automatic run is part of this
+workflow.
 
 ### Request headers
 

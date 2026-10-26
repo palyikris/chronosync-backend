@@ -5,6 +5,7 @@ import os
 import re
 from calendar import monthrange
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 class ExcelReportService:
+    DEFAULT_LOGO_PATH = Path(__file__).resolve().parents[2] / "assets" / "ecovis_logo.png"
+    INVALID_XML_CHARACTERS_RE = re.compile(
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]"
+    )
     MAX_LOGO_PIXELS = 20_000_000
     MAX_NORMALIZED_LOGO_SIZE = (1448, 294)
     TEXTS = {
@@ -83,8 +88,7 @@ class ExcelReportService:
     def set_logo_path(self, logo_path: Optional[str] = None) -> "ExcelReportService":
         """Store a logo path for the next workbook generation."""
         if logo_path is None:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            logo_path = os.path.join(base_dir, "assets", "ecovis_logo.png")
+            logo_path = str(self.DEFAULT_LOGO_PATH)
 
         self.logo_path = logo_path
         return self
@@ -97,8 +101,7 @@ class ExcelReportService:
         if self.logo_path and os.path.exists(self.logo_path):
             return self.logo_path
 
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        default_path = os.path.join(base_dir, "assets", "ecovis_logo.png")
+        default_path = str(self.DEFAULT_LOGO_PATH)
         if os.path.exists(default_path):
             return default_path
         return None
@@ -189,14 +192,15 @@ class ExcelReportService:
 
     @staticmethod
     def _safe_cell_text(value: Any) -> str:
-        text = str(value or "")
+        text = ExcelReportService.INVALID_XML_CHARACTERS_RE.sub("", str(value or ""))
         if text.lstrip().startswith(("=", "+", "-", "@")):
             return f"'{text}"
         return text
 
     @staticmethod
     def _safe_sheet_title(raw_title: Any, existing_titles: list[str]) -> str:
-        base = re.sub(r"[\\/*?:\[\]]", "", str(raw_title or "")).strip()
+        title = ExcelReportService.INVALID_XML_CHARACTERS_RE.sub("", str(raw_title or ""))
+        base = re.sub(r"[\\/*?:\[\]]", "", title).strip()
         base = base[:31] or "Client"
         existing = {title.casefold() for title in existing_titles}
         candidate = base
@@ -357,10 +361,12 @@ class ExcelReportService:
             ws.row_dimensions[13].height = 29.0
 
             # Logo Placement at A1
-            if resolved_logo_path:
+            if logo_path and resolved_logo_path:
                 self._add_logo_to_sheet(ws, resolved_logo_path, "A1")
             elif logo_bytes:
                 self._add_normalized_logo_to_sheet(ws, logo_bytes, "A1")
+            elif resolved_logo_path:
+                self._add_logo_to_sheet(ws, resolved_logo_path, "A1")
 
             # Document Metadata Headers (Rows 6-13, Column C)
             cell_c6 = ws.cell(row=6, column=3, value=client_name)

@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, status
 from uuid import UUID
+
+from fastapi import APIRouter, Depends, status
 
 from app.api.v1.endpoints.reports import extract_bearer_token
 from app.schemas.company import (
@@ -27,18 +28,19 @@ async def get_invoice_settings(
 
 @router.put(
     "/invoice-settings",
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=InvoiceProviderConfigResponse,
 )
 async def set_invoice_settings(
     payload: InvoiceProviderConfigRequest,
     token: str = Depends(extract_bearer_token),
-) -> None:
-    await CompanyCredentialService.set_invoice_settings(
+) -> InvoiceProviderConfigResponse:
+    saved_settings = await CompanyCredentialService.set_invoice_settings(
         user_jwt=token,
         company_id=payload.company_id,
         invoice_provider=payload.invoice_provider,
         api_key=payload.api_key.get_secret_value() if payload.api_key else None,
     )
+    return InvoiceProviderConfigResponse(**saved_settings)
 
 
 @router.post("/szamlazz-key", status_code=status.HTTP_204_NO_CONTENT)

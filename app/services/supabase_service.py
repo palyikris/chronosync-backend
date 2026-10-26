@@ -277,7 +277,9 @@ class SupabaseDataService:
                     ),
                 )
             raw_entries.extend(page)
-            if len(page) < cls.PAGE_SIZE:
+            # The project's Data API cap can be lower than our requested limit.
+            # Only an empty page proves the cursor has reached the end.
+            if not page:
                 break
 
             last_row = page[-1]
