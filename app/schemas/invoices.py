@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal, Self
@@ -123,8 +124,15 @@ class InvoiceCustomer(InvoiceTextModel):
     def require_email_when_sending(self) -> Self:
         if self.send_email and not self.email:
             raise ValueError("email is required when send_email is true")
-        if self.tax_subject == 1 and not (self.tax_number or self.group_tax_number):
+        if self.tax_subject == 1 and not self.tax_number:
             raise ValueError("a Hungarian tax number is required for tax_subject 1")
+        if self.group_tax_number:
+            if self.tax_subject != 1:
+                raise ValueError("group_tax_number requires tax_subject 1")
+            if not re.fullmatch(r"[0-9]{8}-5-[0-9]{2}", self.group_tax_number):
+                raise ValueError("group_tax_number must contain the group's -5- tax number")
+            if not re.fullmatch(r"[0-9]{8}-4-[0-9]{2}", self.tax_number or ""):
+                raise ValueError("tax_number must contain the group member's -4- identifier")
         if self.tax_subject == 6 and not self.eu_tax_number:
             raise ValueError("eu_tax_number is required for tax_subject 6")
         if self.tax_subject == 7 and not self.tax_number:

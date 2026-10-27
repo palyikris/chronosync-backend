@@ -301,12 +301,13 @@ def test_finalized_snapshot_makes_retry_stable_and_detects_changed_hours():
     assert exc_info.value.status_code == 409
 
 
-def test_finalization_conflicts_are_returned_as_http_409():
+@pytest.mark.parametrize("conflict_code", ["40001", "PT409"])
+def test_finalization_conflicts_are_returned_as_http_409(conflict_code):
     class FailingRpc:
         async def execute(self):
             raise APIError(
                 {
-                    "code": "40001",
+                    "code": conflict_code,
                     "message": "Invoice attachment data changed before finalization",
                 }
             )

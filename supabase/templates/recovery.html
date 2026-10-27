@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="hu"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family:Arial,sans-serif;color:#263222;line-height:1.6;max-width:560px;margin:32px auto;padding:24px">
+<h1 style="font-size:24px">Új ChronoSync jelszó / Reset password</h1><p>A folytatás után új jelszót állíthatsz be. / Continue to choose a new password.</p>
+<p><a style="background:#405d32;color:white;padding:12px 20px;border-radius:8px;display:inline-block" href="{{ .SiteURL }}/auth/recover?token_hash={{ .TokenHash }}&amp;type=recovery">Folytatás / Continue</a></p>
+<p>Vagy add meg ezt a kódot az alkalmazásban: / Or enter this code in the app:</p>
+<p style="font-size:28px;letter-spacing:4px;font-weight:bold">{{ .Token }}</p>
+<p><a href="{{ .SiteURL }}/auth/recover">Kód megadása / Enter code</a></p>
+<p style="font-size:13px">Ha nem te kérted ezt az e-mailt, figyelmen kívül hagyhatod. / If you did not request this email, you can ignore it.</p>
+</body></html>

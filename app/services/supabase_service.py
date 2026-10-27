@@ -580,7 +580,7 @@ class SupabaseDataService:
                             "for this company."
                         ),
                     ) from exc
-                if exc.code in {"22023", "40001"}:
+                if exc.code in {"22023", "40001", "PT409"}:
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail=(

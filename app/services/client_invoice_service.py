@@ -22,6 +22,7 @@ from app.schemas.invoices import (
     InvoiceReviewRecipient,
 )
 from app.services.company_service import CompanyCredentialService
+from app.services.invoice_providers.amounts import calculate_line_totals
 from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuError,
     SzamlazzHuProvider,
@@ -531,10 +532,20 @@ class ClientInvoiceService:
                 )
             pdf = cls._decode_bytea(row.get("pdf_bytes"))
             if not pdf or not pdf.startswith(b"%PDF"):
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="A stored PDF is not available for this invoice.",
+                current = await cls.get_invoice_history_item(
+                    user_jwt=user_jwt, company_id=company_id, invoice_id=invoice_id,
                 )
+                pdf = await cls._query_confirmed_pdf(user_jwt=user_jwt, current=current,
+                    invoice_number=current.invoice_number)
+                try:
+                    await supabase.rpc("store_manual_invoice_pdf", {
+                        "p_invoice_id": str(invoice_id), "p_invoice_number": current.invoice_number,
+                        "p_net_total": str(current.net_total), "p_gross_total": str(current.gross_total),
+                        "p_pdf_base64": base64.b64encode(pdf).decode("ascii"),
+                    }).execute()
+                except APIError as exc:
+                    raise HTTPException(409 if str(exc.code) == "PT409" else 502,
+                        "The recovered PDF could not be saved. Retry the PDF download.") from None
             number = cls._required_text(row.get("invoice_number")) or str(invoice_id)
             safe_number = "".join(
                 char for char in number if char.isalnum() or char in "-_"
@@ -578,17 +589,45 @@ class ClientInvoiceService:
                         "the reviewed ledger values."
                     ),
                 )
+            pdf = await cls._query_confirmed_pdf(
+                user_jwt=user_jwt, current=current, invoice_number=invoice_number,
+            )
             await cls._finalize_invoice(
                 user_jwt=user_jwt,
                 invoice_id=invoice_id,
                 invoice_number=invoice_number,
                 net_total=cast(Decimal, net_total),
                 gross_total=cast(Decimal, gross_total),
-                pdf=None,
+                pdf=pdf,
             )
         return await cls.get_invoice_history_item(
             user_jwt=user_jwt, company_id=company_id, invoice_id=invoice_id
         )
+
+    @classmethod
+    async def _query_confirmed_pdf(
+        cls, *, user_jwt: str, current: InvoiceHistoryItem, invoice_number: str | None,
+    ) -> bytes:
+        if current.provider != "szamlazz_hu" or current.status not in {"uncertain", "issued"}:
+            raise HTTPException(409, "This invoice cannot be recovered from Számlázz.hu.")
+        if current.external_id != f"chronosync-{current.id}":
+            raise HTTPException(409, "The invoice external ID does not match its ledger record.")
+        try:
+            async with CompanyCredentialService.decrypted_szamlazz_agent_key(
+                user_jwt=user_jwt, company_id=current.company_id,
+            ) as agent_key:
+                result = await SzamlazzHuProvider(agent_key).get_invoice_pdf(external_id=current.external_id)
+        except SzamlazzHuRejectedError:
+            raise HTTPException(409, "The provider could not return this invoice. Check its external ID and company credential before reconciling.") from None
+        except SzamlazzHuError:
+            raise HTTPException(502, "The existing invoice PDF could not be retrieved. Its reservation remains unchanged.") from None
+        pdf = result.get("pdf")
+        if (not invoice_number or cls._required_text(result.get("invoice_number")) != invoice_number
+                or cls._decimal_or_none(result.get("net_total")) != current.net_total
+                or cls._decimal_or_none(result.get("gross_total")) != current.gross_total
+                or not isinstance(pdf, bytes) or not 0 < len(pdf) <= cls.MAX_PDF_BYTES or not pdf.startswith(b"%PDF")):
+            raise HTTPException(409, "The provider invoice number, totals, and PDF must match the ledger before recovery.")
+        return pdf
 
     @classmethod
     async def _load_client_and_profile(
@@ -750,6 +789,14 @@ class ClientInvoiceService:
         quantity: Decimal,
         preview: bool,
     ) -> tuple[InvoiceCreateRequest, str]:
+        if str(profile.get("vat_code") or "").strip().upper() == "K.AFA":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Margin VAT requires separate purchase-price and margin items. "
+                    "The single-line client billing profile cannot issue this invoice."
+                ),
+            )
         if profile.get("billing_model") == "fixed_monthly" and (
             period_start.day != 1
             or period_end != period_start.replace(
@@ -1017,7 +1064,7 @@ class ClientInvoiceService:
                     status_code=status.HTTP_409_CONFLICT,
                     detail="This invoice reached the five-attempt limit. Resolve the provider issue before contacting support.",
                 ) from exc
-            if exc.code in {"22023", "40001"}:
+            if exc.code in {"22023", "40001", "PT409"}:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
@@ -1118,7 +1165,7 @@ class ClientInvoiceService:
                         detail="Invoice finalization was not confirmed. Reconcile from invoice history before retrying.",
                     )
             except APIError as exc:
-                if exc.code in {"22023", "40001", "23505"}:
+                if exc.code in {"22023", "40001", "PT409", "23505"}:
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail=(
@@ -1189,20 +1236,11 @@ class ClientInvoiceService:
     def _calculate_totals(
         cls, invoice: InvoiceCreateRequest
     ) -> tuple[Decimal, Decimal, Decimal]:
-        quantum = Decimal("1") if invoice.currency == "HUF" else Decimal("0.01")
         net_total = Decimal("0")
         vat_total = Decimal("0")
         for item in invoice.items:
-            line_net = (item.net_unit_price * item.quantity).quantize(
-                quantum, rounding=ROUND_HALF_UP
-            )
-            numeric_vat = (
-                Decimal(item.vat_rate)
-                if item.vat_rate and item.vat_rate[0].isdigit()
-                else Decimal("0")
-            )
-            line_vat = (line_net * numeric_vat / Decimal("100")).quantize(
-                quantum, rounding=ROUND_HALF_UP
+            line_net, line_vat, _ = calculate_line_totals(
+                item, currency=invoice.currency, tax_subject=invoice.customer.tax_subject
             )
             net_total += line_net
             vat_total += line_vat

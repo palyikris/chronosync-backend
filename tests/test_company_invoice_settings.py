@@ -68,6 +68,8 @@ class InvoiceSettingsClient:
         raise AssertionError(f"Unexpected table: {table_name}")
 
     def rpc(self, function_name, params):
+        if function_name == "get_company_invoice_credentials":
+            return FakeQuery({"invoice_provider": self.provider, "invoice_api_key_encrypted": self.encrypted_key})
         assert function_name == "set_company_invoice_credentials"
         self.rpc_params = params
 

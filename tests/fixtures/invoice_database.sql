@@ -31,6 +31,9 @@ create table public.timesheets (id uuid primary key, company_id uuid references 
   project_id uuid references projects, work_date date, hours_logged numeric(5,2),
   description text, status public.timesheet_entry_status default 'approved');
 grant select,update,delete,insert on public.timesheets to authenticated;
+-- Match the hosted lookup grants so the active-client trigger can run. Without
+-- these, edit tests fail on permissions before reaching the invoice guard.
+grant select on public.clients, public.projects to authenticated;
 -- The exact unqualified-name behavior present in the hosted trigger.
 create function public.check_timesheet_client_active() returns trigger language plpgsql as $$
 begin

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import gzip
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
@@ -15,6 +16,53 @@ from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuProvider,
     SzamlazzHuRejectedError,
 )
+
+
+def test_existing_pdf_query_uses_external_id_and_safe_read_operation_with_gzip():
+    seen = []
+    response = b'''<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz">
+      <sikeres>true</sikeres><szamlaszam>TESZT-2026-5</szamlaszam>
+      <szamlanetto>25000</szamlanetto><szamlabrutto>31750</szamlabrutto><pdf>JVBERi1saXZl</pdf>
+    </xmlszamlavalasz>'''
+    def handler(request):
+        seen.append(request)
+        assert b'name="action-szamla_agent_pdf"' in request.content
+        assert b'action-xmlagentxmlfile' not in request.content
+        xml = request.content.split(b'\r\n\r\n',1)[1].rsplit(b'\r\n--',1)[0]
+        root = ElementTree.fromstring(xml)
+        ns = '{http://www.szamlazz.hu/xmlszamlapdf}'
+        assert root.tag == ns+'xmlszamlapdf'
+        assert [node.tag for node in root] == [ns+name for name in ['szamlaagentkulcs','valaszVerzio','szamlaKulsoAzon']]
+        assert root.find(ns+'szamlaKulsoAzon').text == 'chronosync-existing'
+        from pathlib import Path
+        import hashlib
+        import shutil
+        import subprocess
+        schema = Path(__file__).parent/'fixtures/szamlazz/xmlszamlapdf.xsd'
+        assert hashlib.sha256(schema.read_bytes()).hexdigest() == 'b9b161d1356bcd10791605f74c390a0b2b347fdc19a4cf074f76f8a91fe3cfdf'
+        if shutil.which('xmllint'):
+            validation = subprocess.run(['xmllint','--noout','--nonet','--schema',str(schema),'-'], input=xml,capture_output=True)
+            assert validation.returncode == 0, validation.stderr.decode()
+        return httpx.Response(200,content=gzip.compress(response),headers={'Content-Encoding':'gzip'})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await SzamlazzHuProvider('test-key',http_client=client).get_invoice_pdf(external_id='chronosync-existing')
+    result = asyncio.run(run())
+    assert len(seen) == 1 and result['invoice_number'] == 'TESZT-2026-5' and result['pdf'] == b'%PDF-live'
+
+
+def test_unknown_existing_invoice_remains_a_rejection_without_creation_retry():
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200,content=b'''<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz">
+          <sikeres>false</sikeres><hibakod>7</hibakod><hibauzenet>Unknown invoice</hibauzenet></xmlszamlavalasz>''')
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await SzamlazzHuProvider('test-key',http_client=client).get_invoice_pdf(external_id='chronosync-unknown')
+    with pytest.raises(SzamlazzHuRejectedError) as error:
+        asyncio.run(run())
+    assert error.value.code == '7' and len(calls) == 1
 
 
 def invoice_payload(**overrides):
@@ -84,6 +132,7 @@ def test_build_invoice_xml_supports_group_tax_number_and_exempt_vat_code():
     payload = invoice_payload()
     payload["customer"] = {
         **payload["customer"],
+        "tax_number": "12345678-4-41",
         "group_tax_number": "17781228-5-44",
     }
     payload["items"] = [
