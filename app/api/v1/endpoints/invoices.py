@@ -18,7 +18,7 @@ from app.services.company_service import CompanyCredentialService
 from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuError,
     SzamlazzHuProvider,
-    SzamlazzHuResponseError,
+    SzamlazzHuRejectedError,
 )
 
 
@@ -40,7 +40,7 @@ async def _generate_preview_pdf(
             result = await SzamlazzHuProvider(api_key).create_invoice(
                 safe_invoice.model_dump()
             )
-    except SzamlazzHuResponseError as exc:
+    except SzamlazzHuRejectedError as exc:
         detail = "Számlázz.hu rejected the invoice preview."
         if exc.code:
             detail = f"{detail} Error code: {exc.code}."

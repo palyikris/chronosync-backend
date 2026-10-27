@@ -46,6 +46,8 @@ def schema():
     result = sql(finalize_sql(invoice_id), identity=ADMIN, role='authenticated', check=False)
     assert result.returncode != 0 and 'relation "clients" does not exist' in result.stderr
     sql((ROOT/'supabase/migrations/20261026083353_harden_manual_invoice_consistency.sql').read_text())
+    sql((ROOT/'supabase/migrations/20261027091353_avoid_retryable_invoice_business_conflicts.sql').read_text())
+    sql((ROOT/'supabase/migrations/20261027132449_recover_existing_invoice_pdf.sql').read_text())
 
 
 def seed():
@@ -96,6 +98,24 @@ def test_success_is_atomic_and_replay_is_idempotent():
     assert sql('select status || pdf_available::text from invoice_ledger').stdout.strip()=='issuedtrue'
 
 
+def test_missing_pdf_can_be_recovered_without_changing_issuance_and_replay_preserves_pdf():
+    invoice_id = reserve()
+    sql(finalize_sql(invoice_id, pdf='null'),identity=ADMIN,role='authenticated')
+    before = sql('select issued_at::text from invoice_ledger').stdout.strip()
+    command = f"select store_manual_invoice_pdf('{invoice_id}','TEST-2026-1',25000,31750,'JVBERi1yZWNvdmVyZWQ=')"
+    for _ in range(2):
+        sql(command,identity=ADMIN,role='authenticated')
+    assert sql('select issued_at::text from invoice_ledger').stdout.strip() == before
+    assert sql("select convert_from(pdf_bytes,'UTF8')||':'||status from invoice_ledger").stdout.strip() == '%PDF-recovered:issued'
+    sql(command.replace('JVBERi1yZWNvdmVyZWQ=', 'JVBERi1vdGhlcg=='),identity=ADMIN,role='authenticated')
+    assert sql("select convert_from(pdf_bytes,'UTF8') from invoice_ledger").stdout.strip() == '%PDF-recovered'
+    for identity in [OTHER_ADMIN,EMPLOYEE]:
+        assert sql(command,identity=identity,role='authenticated',check=False).returncode
+    assert sql(command,role='anon',check=False).returncode
+    assert sql(command.replace('25000','24999'),identity=ADMIN,role='authenticated',check=False).returncode
+    assert sql(command.replace('JVBERi1yZWNvdmVyZWQ=','bm90LXBkZg=='),identity=ADMIN,role='authenticated',check=False).returncode
+
+
 @pytest.mark.parametrize('identity',[OTHER_ADMIN,EMPLOYEE])
 def test_other_tenant_and_employee_cannot_reserve_or_read(identity):
     assert sql(reserve_sql(str(uuid4())),identity=identity,role='authenticated',check=False).returncode
@@ -118,6 +138,18 @@ def test_reserved_timesheets_cannot_change(change):
 def test_reserved_timesheet_cannot_be_deleted():
     reserve()
     assert sql('delete from timesheets',identity=ADMIN,role='authenticated',check=False).returncode
+
+
+def test_reserved_edit_returns_nonretryable_http_conflict():
+    sql("update public.timesheets set description='Editable before reservation'", identity=ADMIN, role='authenticated')
+    sql("update public.timesheets set description='Work'", identity=ADMIN, role='authenticated')
+    reserve()
+    # An actual UPDATE must raise PT409, rather than PostgREST's retry signal.
+    sql("""do $test$ begin
+      update public.timesheets set description='Changed';
+      raise exception 'Reserved mutation unexpectedly succeeded';
+    exception when sqlstate 'PT409' then null;
+    end; $test$;""", identity=ADMIN, role='authenticated')
 
 
 @pytest.mark.parametrize('change',["description='Changed'",'hours_logged=3',"work_date='2026-09-16'"])

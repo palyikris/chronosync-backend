@@ -141,13 +141,9 @@ class CompanyCredentialService:
     async def _get_stored_config(
         supabase: Any, company_id: UUID
     ) -> tuple[str, str | None]:
-        response = await (
-            supabase.table("companies")
-            .select("invoice_provider, invoice_api_key_encrypted")
-            .eq("id", str(company_id))
-            .single()
-            .execute()
-        )
+        response = await supabase.rpc("get_company_invoice_credentials", {
+            "p_company_id": str(company_id),
+        }).execute()
         row = cast(dict[str, Any], response.data or {})
         return (
             str(row.get("invoice_provider") or "szamlazz_hu"),
@@ -166,15 +162,7 @@ class CompanyCredentialService:
                 user_jwt=user_jwt,
                 company_id=company_id,
             )
-            response = await (
-                supabase.table("companies")
-                .select("invoice_provider, invoice_api_key_encrypted")
-                .eq("id", str(company_id))
-                .single()
-                .execute()
-            )
-            row = cast(dict[str, Any], response.data or {})
-            provider = row.get("invoice_provider") or "szamlazz_hu"
+            provider, encrypted_key = await cls._get_stored_config(supabase, company_id)
             if provider not in {"szamlazz_hu", "billingo"}:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -182,7 +170,7 @@ class CompanyCredentialService:
                 )
             return {
                 "invoice_provider": provider,
-                "api_key_configured": bool(row.get("invoice_api_key_encrypted")),
+                "api_key_configured": bool(encrypted_key),
             }
         except HTTPException:
             raise
@@ -215,20 +203,12 @@ class CompanyCredentialService:
                 user_jwt=user_jwt,
                 company_id=company_id,
             )
-            response = await (
-                supabase.table("companies")
-                .select("invoice_provider, invoice_api_key_encrypted")
-                .eq("id", str(company_id))
-                .single()
-                .execute()
-            )
-            row = cast(dict[str, Any], response.data or {})
-            if (row.get("invoice_provider") or "szamlazz_hu") != "szamlazz_hu":
+            provider, encrypted_key = await cls._get_stored_config(supabase, company_id)
+            if provider != "szamlazz_hu":
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="Számlázz.hu is not the selected invoice provider.",
                 )
-            encrypted_key = row.get("invoice_api_key_encrypted")
             if not encrypted_key:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,

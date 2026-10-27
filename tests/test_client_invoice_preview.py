@@ -63,7 +63,7 @@ def billing_profile(**overrides):
         "billing_city": "Budapest",
         "billing_address": "Teszt utca 1.",
         "tax_subject": 1,
-        "tax_number": "12345678-2-41",
+        "tax_number": "12345678-4-41",
         "eu_vat_number": None,
         "group_tax_number": "17781228-5-44",
         "billing_email": "billing@example.test",

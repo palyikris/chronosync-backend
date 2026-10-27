@@ -2,11 +2,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
+from postgrest.exceptions import APIError
 
 from app.schemas.invoices import (
     ClientInvoiceReview,
@@ -15,6 +17,7 @@ from app.schemas.invoices import (
 )
 from app.services.client_invoice_service import ClientInvoiceService
 from app.services.company_service import CompanyCredentialService
+from app.services.supabase_service import SupabaseDataService
 from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuProvider,
     SzamlazzHuRejectedError,
@@ -27,6 +30,27 @@ COMPANY_ID = UUID("10000000-0000-0000-0000-000000000001")
 CLIENT_ID = UUID("20000000-0000-0000-0000-000000000002")
 INVOICE_ID = UUID("30000000-0000-0000-0000-000000000003")
 TIMESHEET_ID = UUID("40000000-0000-0000-0000-000000000004")
+
+
+@pytest.mark.parametrize("operation", ["reserve", "finalize"])
+def test_nonretryable_database_business_conflicts_return_http_409(operation):
+    rpc = SimpleNamespace(execute=AsyncMock(side_effect=APIError({
+        "code": "PT409", "message": "The reviewed invoice state changed",
+    })))
+    client = SimpleNamespace(rpc=lambda *_args, **_kwargs: rpc)
+    with (
+        patch.object(SupabaseDataService, "get_authenticated_client", AsyncMock(return_value=client)),
+        patch.object(SupabaseDataService, "_close_authenticated_client", AsyncMock()),
+        pytest.raises(HTTPException) as raised,
+    ):
+        if operation == "reserve":
+            asyncio.run(ClientInvoiceService._reserve_invoice(user_jwt="test", review=invoice_review()))
+        else:
+            asyncio.run(ClientInvoiceService._finalize_invoice(
+                user_jwt="test", invoice_id=INVOICE_ID, invoice_number="TEST-1",
+                net_total=Decimal("25000"), gross_total=Decimal("31750"), pdf=None,
+            ))
+    assert raised.value.status_code == 409
 
 
 def invoice_request() -> InvoiceCreateRequest:
@@ -149,6 +173,79 @@ def history_item() -> InvoiceHistoryItem:
 @asynccontextmanager
 async def fake_agent_key(*_args, **_kwargs):
     yield "agent-key"
+
+
+def test_reconciliation_queries_existing_invoice_and_saves_pdf_without_issuance():
+    current = history_item().model_copy(update={'status':'uncertain','pdf_available':False})
+    provider = {'invoice_number':'E-2026-1','net_total':'25000','gross_total':'31750','pdf':b'%PDF-recovered'}
+    with patch.object(ClientInvoiceService,'get_invoice_history_item',AsyncMock(side_effect=[current,history_item()])), \
+         patch.object(CompanyCredentialService,'decrypted_szamlazz_agent_key',fake_agent_key), \
+         patch.object(SzamlazzHuProvider,'get_invoice_pdf',AsyncMock(return_value=provider)) as query, \
+         patch.object(SzamlazzHuProvider,'create_invoice',AsyncMock()) as create, \
+         patch.object(ClientInvoiceService,'_finalize_invoice',AsyncMock()) as finalize:
+        result = asyncio.run(ClientInvoiceService.reconcile_invoice(user_jwt='test',company_id=COMPANY_ID,
+            invoice_id=INVOICE_ID,resolution='issued',invoice_number='E-2026-1',net_total=Decimal('25000'),gross_total=Decimal('31750')))
+    assert result.status == 'issued'
+    query.assert_awaited_once_with(external_id=f'chronosync-{INVOICE_ID}')
+    create.assert_not_awaited()
+    assert finalize.await_args.kwargs['pdf'] == b'%PDF-recovered'
+
+
+@pytest.mark.parametrize('changes',[{'invoice_number':'WRONG'}, {'net_total':'1'}, {'gross_total':'1'}, {'pdf':None}, {'pdf':b'bad'}])
+def test_recovery_mismatch_does_not_finalize_or_release_reservation(changes):
+    current = history_item().model_copy(update={'status':'uncertain','pdf_available':False})
+    provider = {'invoice_number':'E-2026-1','net_total':'25000','gross_total':'31750','pdf':b'%PDF-recovered',**changes}
+    with patch.object(ClientInvoiceService,'get_invoice_history_item',AsyncMock(return_value=current)), \
+         patch.object(CompanyCredentialService,'decrypted_szamlazz_agent_key',fake_agent_key), \
+         patch.object(SzamlazzHuProvider,'get_invoice_pdf',AsyncMock(return_value=provider)), \
+         patch.object(ClientInvoiceService,'_finalize_invoice',AsyncMock()) as finalize, \
+         patch.object(ClientInvoiceService,'_resolve_not_issued',AsyncMock()) as release:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(ClientInvoiceService.reconcile_invoice(user_jwt='test',company_id=COMPANY_ID,
+                invoice_id=INVOICE_ID,resolution='issued',invoice_number='E-2026-1',net_total=Decimal('25000'),gross_total=Decimal('31750')))
+    assert error.value.status_code == 409
+    finalize.assert_not_awaited()
+    release.assert_not_awaited()
+
+
+def test_recovery_uses_ledger_external_id_and_preserves_uncertain_state_on_lookup_failure():
+    current = history_item().model_copy(update={'status':'uncertain','pdf_available':False})
+    with patch.object(CompanyCredentialService,'decrypted_szamlazz_agent_key',fake_agent_key), \
+         patch.object(SzamlazzHuProvider,'get_invoice_pdf',AsyncMock(side_effect=SzamlazzHuRequestError('Unavailable'))), \
+         patch.object(ClientInvoiceService,'_finalize_invoice',AsyncMock()) as finalize:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(ClientInvoiceService._query_confirmed_pdf(user_jwt='test',current=current,invoice_number='E-2026-1'))
+    assert error.value.status_code == 502
+    finalize.assert_not_awaited()
+
+
+@pytest.mark.parametrize('stored_pdf',[None, '\\x255044462d73746f726564'])
+def test_pdf_download_recovers_only_when_missing_and_never_reissues(stored_pdf):
+    rpc_calls = []
+    class Query:
+        def __getattr__(self, _):
+            return lambda *_a, **_kw: self
+        async def execute(self):
+            return SimpleNamespace(data=[{'invoice_number':'E-2026-1','pdf_bytes':stored_pdf}])
+    def rpc(name, params):
+        rpc_calls.append((name,params))
+        return SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(data=None)))
+    client = SimpleNamespace(table=lambda _:Query(),rpc=rpc)
+    with patch.object(SupabaseDataService,'get_authenticated_client',AsyncMock(return_value=client)), \
+         patch.object(SupabaseDataService,'_close_authenticated_client',AsyncMock()), \
+         patch.object(SupabaseDataService,'_assert_invoice_attachment_access_with_client',AsyncMock()), \
+         patch.object(ClientInvoiceService,'get_invoice_history_item',AsyncMock(return_value=history_item())), \
+         patch.object(ClientInvoiceService,'_query_confirmed_pdf',AsyncMock(return_value=b'%PDF-recovered')) as recover, \
+         patch.object(SzamlazzHuProvider,'create_invoice',AsyncMock()) as create:
+        pdf, filename = asyncio.run(ClientInvoiceService.get_invoice_pdf(user_jwt='test',company_id=COMPANY_ID,invoice_id=INVOICE_ID))
+    assert filename == 'invoice-E-2026-1.pdf'
+    if stored_pdf is None:
+        assert pdf == b'%PDF-recovered' and rpc_calls[0][0] == 'store_manual_invoice_pdf'
+        recover.assert_awaited_once()
+    else:
+        assert pdf == b'%PDF-stored' and not rpc_calls
+        recover.assert_not_awaited()
+    create.assert_not_awaited()
 
 
 def test_confirmed_provider_success_finalizes_ledger_after_single_live_call():

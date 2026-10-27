@@ -108,6 +108,8 @@ The backend expects the following environment variables to be present in a `.env
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
 ENCRYPTION_MASTER_KEY=<Fernet key generated for this server>
+SUPABASE_SERVICE_ROLE_KEY=<server-only Auth admin key for trusted invitations>
+FRONTEND_URL=https://chronosync-lovat.vercel.app
 ```
 
 These values are loaded by the configuration module and used to create the Supabase client used for data access.
