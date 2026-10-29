@@ -1,7 +1,7 @@
 import re
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -217,10 +217,12 @@ class InvoicePreviewRequest(BaseModel):
 
 
 class ClientInvoicePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     company_id: UUID
     client_id: UUID
     period_start: date
     period_end: date
+    project_quantities: dict[UUID, Annotated[Decimal, Field(ge=0, le=999999, allow_inf_nan=False)]] = Field(default_factory=dict, max_length=500)
 
     @model_validator(mode="after")
     def validate_period(self) -> Self:
@@ -232,10 +234,12 @@ class ClientInvoicePreviewRequest(BaseModel):
 
 
 class ClientInvoiceReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     company_id: UUID
     client_id: UUID
     period_start: date
     period_end: date
+    project_quantities: dict[UUID, Annotated[Decimal, Field(ge=0, le=999999, allow_inf_nan=False)]] = Field(default_factory=dict, max_length=500)
 
     @model_validator(mode="after")
     def validate_period(self) -> Self:
@@ -262,10 +266,26 @@ class InvoiceReviewRecipient(BaseModel):
 
 class InvoiceReviewEntry(BaseModel):
     id: UUID
+    project_id: UUID | None = None
     work_date: date
     hours_logged: Decimal
     description: str
     project_name: str
+
+
+class InvoiceReviewProjectLine(BaseModel):
+    project_id: UUID
+    project_name: str
+    pricing_year: int
+    pricing_updated_at: datetime
+    quantity: Decimal
+    unit: str
+    net_unit_price: Decimal
+    vat_code: str
+    currency: str
+    net_total: Decimal
+    vat_total: Decimal
+    gross_total: Decimal
 
 
 class ClientInvoiceReview(BaseModel):
@@ -280,7 +300,7 @@ class ClientInvoiceReview(BaseModel):
     due_date: date
     payment_method: str
     language: InvoiceLanguage
-    billing_model: Literal["hourly", "fixed_monthly"]
+    billing_model: Literal["hourly", "fixed_monthly", "project"]
     item_name: str
     quantity: Decimal
     unit: str
@@ -294,6 +314,8 @@ class ClientInvoiceReview(BaseModel):
     gross_total: Decimal
     recipient: InvoiceReviewRecipient
     approved_entries: list[InvoiceReviewEntry]
+    items: list[InvoiceReviewProjectLine] = Field(default_factory=list)
+    project_quantities: dict[UUID, Decimal] = Field(default_factory=dict)
     review_fingerprint: str
 
 

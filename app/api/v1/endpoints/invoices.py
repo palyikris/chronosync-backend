@@ -111,6 +111,7 @@ async def preview_client_invoice(
         client_id=payload.client_id,
         period_start=payload.period_start,
         period_end=payload.period_end,
+        project_quantities=payload.project_quantities,
     )
     pdf = await _generate_preview_pdf(
         token=token,
@@ -138,6 +139,7 @@ async def review_client_invoice(
         client_id=payload.client_id,
         period_start=payload.period_start,
         period_end=payload.period_end,
+        project_quantities=payload.project_quantities,
     )
 
 
@@ -154,6 +156,7 @@ async def issue_client_invoice(
         period_start=payload.period_start,
         period_end=payload.period_end,
         review_fingerprint=payload.review_fingerprint,
+        project_quantities=payload.project_quantities,
     )
 
 

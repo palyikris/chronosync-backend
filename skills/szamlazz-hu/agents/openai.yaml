@@ -1,0 +1,4 @@
+interface:
+  display_name: "Számlázz.hu"
+  short_description: "Build and validate Számla Agent invoicing"
+  default_prompt: "Use $szamlazz-hu to implement or validate a Számla Agent integration against the current official documentation."
