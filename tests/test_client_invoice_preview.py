@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 from app.api.v1.endpoints.invoices import preview_client_invoice
-from app.schemas.invoices import ClientInvoicePreviewRequest
+from app.schemas.invoices import ClientInvoicePreviewRequest, InvoiceReviewProjectLine
 from app.services.client_invoice_service import ClientInvoiceService
 from app.services.company_service import CompanyCredentialService
 from app.services.invoice_providers.szamlazz_hu import SzamlazzHuProvider
@@ -82,21 +82,20 @@ def billing_profile(**overrides):
     return profile
 
 
-def build_from_profile(profile):
-    return ClientInvoiceService._build_from_profile(
-        supabase=object(),
-        company_id=COMPANY_ID,
-        client_id=CLIENT_ID,
-        period_start=date(2026, 9, 1),
-        period_end=date(2026, 9, 30),
-        client={"client_code": "MINTA"},
-        profile=profile,
-    )
+async def build_from_profile(profile, quantity=Decimal("1")):
+    # These explicit project lines test provider/recipient conversion. Integration
+    # tests cover reading authoritative rates and approved project hours.
+    line = InvoiceReviewProjectLine(project_id=UUID(int=3), project_name="Monthly service",
+        pricing_year=2026, pricing_updated_at="2026-10-28T00:00:00Z", quantity=quantity,
+        unit="hó", net_unit_price=Decimal("250000"), vat_code=profile["vat_code"],
+        currency="HUF", net_total=Decimal("250000"), vat_total=0, gross_total=Decimal("250000"))
+    return ClientInvoiceService._build_invoice_request(company_id=COMPANY_ID, client_id=CLIENT_ID,
+        period_start=date(2026,9,1), period_end=date(2026,9,30), client={"client_code":"MINTA"},
+        profile=profile, lines=[line], preview=True)
 
 
-def test_fixed_monthly_preview_uses_saved_billing_profile_and_never_emails():
-    invoice, client_code = asyncio.run(build_from_profile(billing_profile()))
-
+def test_project_preview_preserves_recipient_and_never_emails():
+    invoice, client_code = asyncio.run(build_from_profile(billing_profile(net_unit_price="999999")))
     assert client_code == "MINTA"
     assert invoice.customer.name == "Minta Kft."
     assert invoice.customer.group_tax_number == "17781228-5-44"
@@ -104,31 +103,12 @@ def test_fixed_monthly_preview_uses_saved_billing_profile_and_never_emails():
     assert invoice.items[0].quantity == Decimal("1")
     assert invoice.items[0].net_unit_price == Decimal("250000")
     assert invoice.items[0].vat_rate == "AAM"
-    assert invoice.preview is True
-    assert invoice.download_pdf is True
+    assert invoice.preview is True and invoice.download_pdf is True
 
 
-def test_hourly_preview_uses_only_the_approved_hours_resolved_by_service():
-    approved_hours = AsyncMock(return_value=Decimal("17.75"))
-
-    with patch.object(
-        ClientInvoiceService,
-        "_fetch_approved_hours",
-        approved_hours,
-    ):
-        invoice, _ = asyncio.run(
-            build_from_profile(
-                billing_profile(
-                    billing_model="hourly",
-                    invoice_unit="óra",
-                    net_unit_price="28500",
-                    vat_code="27",
-                )
-            )
-        )
-
+def test_invoice_builder_uses_resolved_project_quantity_instead_of_client_defaults():
+    invoice, _ = asyncio.run(build_from_profile(billing_profile(), Decimal("17.75")))
     assert invoice.items[0].quantity == Decimal("17.75")
-    approved_hours.assert_awaited_once()
 
 
 def test_hourly_quantity_query_is_company_client_period_and_status_scoped():
@@ -210,12 +190,11 @@ def test_client_preview_endpoint_downloads_pdf_without_issuing_or_emailing():
     )
 
 
-def test_fixed_monthly_rejects_partial_or_multiple_months():
+def test_invoice_builder_refuses_missing_project_lines():
     import pytest
     from fastapi import HTTPException
-    for start,end in [(date(2026,9,2),date(2026,9,30)),(date(2026,9,1),date(2026,10,31))]:
-        with pytest.raises(HTTPException) as error:
-            ClientInvoiceService._build_invoice_request(company_id=COMPANY_ID,client_id=CLIENT_ID,
-                period_start=start,period_end=end,client={'client_code':'MINTA'},profile=billing_profile(),
-                quantity=Decimal('1'),preview=False)
-        assert error.value.status_code==409
+    with pytest.raises(HTTPException) as raised:
+        ClientInvoiceService._build_invoice_request(company_id=COMPANY_ID,client_id=CLIENT_ID,
+            period_start=date(2026,9,1),period_end=date(2026,9,30),client={"client_code":"MINTA"},
+            profile=billing_profile(),lines=[],preview=False)
+    assert raised.value.status_code==409

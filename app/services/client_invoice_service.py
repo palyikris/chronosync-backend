@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import calendar
 import hashlib
 import json
 import logging
@@ -20,6 +19,7 @@ from app.schemas.invoices import (
     InvoiceHistoryItem,
     InvoiceReviewEntry,
     InvoiceReviewRecipient,
+    InvoiceReviewProjectLine,
 )
 from app.services.company_service import CompanyCredentialService
 from app.services.invoice_providers.amounts import calculate_line_totals
@@ -29,6 +29,7 @@ from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuRejectedError,
 )
 from app.services.supabase_service import SupabaseDataService
+from app.services.project_invoice_pricing import build_project_lines
 
 
 logger = logging.getLogger(__name__)
@@ -56,26 +57,14 @@ class ClientInvoiceService:
         client_id: UUID,
         period_start: date,
         period_end: date,
+        project_quantities: dict[UUID, Decimal] | None = None,
     ) -> tuple[InvoiceCreateRequest, str]:
-        supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
-        try:
-            await SupabaseDataService._assert_invoice_attachment_access_with_client(
-                supabase, user_jwt=user_jwt, company_id=company_id
-            )
-            client, profile = await cls._load_client_and_profile(
-                supabase, company_id=company_id, client_id=client_id
-            )
-            return await cls._build_from_profile(
-                supabase=supabase,
-                company_id=company_id,
-                client_id=client_id,
-                period_start=period_start,
-                period_end=period_end,
-                client=client,
-                profile=profile,
-            )
-        finally:
-            await SupabaseDataService._close_authenticated_client(supabase)
+        review, invoice = await cls._build_review_context(
+            user_jwt=user_jwt, company_id=company_id, client_id=client_id,
+            period_start=period_start, period_end=period_end, project_quantities=project_quantities,
+        )
+        return invoice.model_copy(update={"preview": True,
+            "customer": invoice.customer.model_copy(update={"send_email": False})}), review.client_code
 
     @classmethod
     async def build_invoice_review(
@@ -86,6 +75,7 @@ class ClientInvoiceService:
         client_id: UUID,
         period_start: date,
         period_end: date,
+        project_quantities: dict[UUID, Decimal] | None = None,
     ) -> ClientInvoiceReview:
         review, _ = await cls._build_review_context(
             user_jwt=user_jwt,
@@ -93,6 +83,7 @@ class ClientInvoiceService:
             client_id=client_id,
             period_start=period_start,
             period_end=period_end,
+            project_quantities=project_quantities,
         )
         return review
 
@@ -105,6 +96,7 @@ class ClientInvoiceService:
         client_id: UUID,
         period_start: date,
         period_end: date,
+        project_quantities: dict[UUID, Decimal] | None = None,
     ) -> tuple[ClientInvoiceReview, InvoiceCreateRequest]:
         supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
@@ -122,22 +114,10 @@ class ClientInvoiceService:
                 period_start=period_start,
                 period_end=period_end,
             )
-            approved_hours = sum(
-                (entry.hours_logged for entry in entries), Decimal("0")
-            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            billing_model = str(profile.get("billing_model"))
-            if billing_model == "hourly":
-                if approved_hours <= 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=(
-                            "No approved, uninvoiced time entries were found for this "
-                            "client and period."
-                        ),
-                    )
-                quantity = approved_hours
-            else:
-                quantity = Decimal("1")
+            lines = await build_project_lines(supabase, company_id=company_id, client_id=client_id,
+                period_start=period_start, period_end=period_end, entries=entries,
+                project_quantities=project_quantities or {}, vat_code=str(profile["vat_code"]),
+                tax_subject=int(profile["tax_subject"]))
 
             invoice, client_code = cls._build_invoice_request(
                 company_id=company_id,
@@ -146,7 +126,7 @@ class ClientInvoiceService:
                 period_end=period_end,
                 client=client,
                 profile=profile,
-                quantity=quantity,
+                lines=lines,
                 preview=False,
             )
             net_total, vat_total, gross_total = cls._calculate_totals(invoice)
@@ -175,11 +155,11 @@ class ClientInvoiceService:
                 "due_date": invoice.due_date,
                 "payment_method": invoice.payment_method,
                 "language": invoice.language,
-                "billing_model": billing_model,
-                "item_name": invoice.items[0].name,
-                "quantity": quantity,
-                "unit": invoice.items[0].unit,
-                "net_unit_price": invoice.items[0].net_unit_price,
+                "billing_model": "project",
+                "item_name": " / ".join(line.project_name for line in lines),
+                "quantity": Decimal("1"),
+                "unit": "számla",
+                "net_unit_price": net_total,
                 "vat_code": invoice.items[0].vat_rate,
                 "currency": invoice.currency,
                 "exchange_rate_bank": (
@@ -191,6 +171,8 @@ class ClientInvoiceService:
                 "gross_total": gross_total,
                 "recipient": recipient,
                 "approved_entries": entries,
+                "items": lines,
+                "project_quantities": {str(key): str(value) for key, value in (project_quantities or {}).items()},
             }
             review = ClientInvoiceReview(
                 **review_data,
@@ -210,6 +192,7 @@ class ClientInvoiceService:
         period_start: date,
         period_end: date,
         review_fingerprint: str,
+        project_quantities: dict[UUID, Decimal] | None = None,
     ) -> InvoiceHistoryItem:
         review, invoice = await cls._build_review_context(
             user_jwt=user_jwt,
@@ -217,6 +200,7 @@ class ClientInvoiceService:
             client_id=client_id,
             period_start=period_start,
             period_end=period_end,
+            project_quantities=project_quantities,
         )
         if review.review_fingerprint != review_fingerprint:
             raise HTTPException(
@@ -665,9 +649,8 @@ class ClientInvoiceService:
                 "client_id, company_id, billing_name, billing_country_code, "
                 "billing_postal_code, billing_city, billing_address, tax_subject, "
                 "tax_number, eu_vat_number, group_tax_number, billing_email, "
-                "send_invoice_email, invoice_language, currency, payment_method, "
-                "payment_term_days, billing_model, net_unit_price, invoice_unit, "
-                "vat_code, invoice_item_name, updated_at"
+                "send_invoice_email, invoice_language, payment_method, "
+                "payment_term_days, vat_code, updated_at"
             )
             .eq("client_id", str(client_id))
             .eq("company_id", str(company_id))
@@ -735,135 +718,40 @@ class ClientInvoiceService:
             await SupabaseDataService._close_authenticated_client(supabase)
 
     @classmethod
-    async def _build_from_profile(
-        cls,
-        *,
-        supabase: Any,
-        company_id: UUID,
-        client_id: UUID,
-        period_start: date,
-        period_end: date,
-        client: dict[str, Any],
-        profile: dict[str, Any],
-    ) -> tuple[InvoiceCreateRequest, str]:
-        cls._validate_profile(profile)
-        if str(profile.get("billing_model")) == "hourly":
-            quantity = await cls._fetch_approved_hours(
-                supabase,
-                company_id=company_id,
-                client_id=client_id,
-                period_start=period_start,
-                period_end=period_end,
-            )
-            if quantity <= 0:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=(
-                        "No approved, uninvoiced time entries were found for this "
-                        "client and period."
-                    ),
-                )
-        else:
-            quantity = Decimal("1")
-        return cls._build_invoice_request(
-            company_id=company_id,
-            client_id=client_id,
-            period_start=period_start,
-            period_end=period_end,
-            client=client,
-            profile=profile,
-            quantity=quantity,
-            preview=True,
-        )
-
-    @classmethod
     def _build_invoice_request(
-        cls,
-        *,
-        company_id: UUID,
-        client_id: UUID,
-        period_start: date,
-        period_end: date,
-        client: dict[str, Any],
-        profile: dict[str, Any],
-        quantity: Decimal,
-        preview: bool,
+        cls, *, company_id: UUID, client_id: UUID, period_start: date,
+        period_end: date, client: dict[str, Any], profile: dict[str, Any],
+        lines: list[InvoiceReviewProjectLine], preview: bool,
     ) -> tuple[InvoiceCreateRequest, str]:
         if str(profile.get("vat_code") or "").strip().upper() == "K.AFA":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "Margin VAT requires separate purchase-price and margin items. "
-                    "The single-line client billing profile cannot issue this invoice."
-                ),
-            )
-        if profile.get("billing_model") == "fixed_monthly" and (
-            period_start.day != 1
-            or period_end != period_start.replace(
-                day=calendar.monthrange(period_start.year, period_start.month)[1]
-            )
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Fixed monthly billing requires exactly one complete calendar month.",
-            )
+            raise HTTPException(409, "Margin VAT requires separately configured purchase-price and margin items.")
+        if not lines:
+            raise HTTPException(409, "No billable project lines were selected.")
         issue_date = datetime.now(cls.BUDAPEST_TIMEZONE).date()
         due_date = issue_date + timedelta(days=int(profile["payment_term_days"]))
-        order_number = (
-            f"cs-{company_id.hex}-{client_id.hex}-{period_start:%Y%m%d}-"
-            f"{period_end:%Y%m%d}"
-        )
+        order_number = f"cs-{company_id.hex}-{client_id.hex}-{period_start:%Y%m%d}-{period_end:%Y%m%d}"
         try:
-            invoice = InvoiceCreateRequest.model_validate(
-                {
-                    "issue_date": issue_date,
-                    "fulfillment_date": period_end,
-                    "due_date": due_date,
-                    "payment_method": profile["payment_method"],
-                    "currency": profile["currency"],
-                    "language": profile["invoice_language"],
-                    "order_number": order_number,
-                    "external_id": order_number,
-                    "preview": preview,
-                    "download_pdf": True,
-                    "customer": {
-                        "name": profile["billing_name"],
-                        "country": profile["billing_country_code"],
-                        "postal_code": profile["billing_postal_code"],
-                        "city": profile["billing_city"],
-                        "address": profile["billing_address"],
-                        "email": profile.get("billing_email"),
-                        "send_email": (
-                            False
-                            if preview
-                            else profile.get("send_invoice_email") is True
-                        ),
-                        "tax_subject": profile["tax_subject"],
-                        "tax_number": profile.get("tax_number"),
-                        "eu_tax_number": profile.get("eu_vat_number"),
-                        "group_tax_number": profile.get("group_tax_number"),
-                    },
-                    "items": [
-                        {
-                            "name": profile["invoice_item_name"],
-                            "quantity": quantity,
-                            "unit": profile["invoice_unit"],
-                            "net_unit_price": profile["net_unit_price"],
-                            "vat_rate": profile["vat_code"],
-                        }
-                    ],
-                }
-            )
+            invoice = InvoiceCreateRequest.model_validate({
+                "issue_date": issue_date, "fulfillment_date": period_end,
+                "due_date": due_date, "payment_method": profile["payment_method"],
+                "currency": lines[0].currency, "language": profile["invoice_language"],
+                "order_number": order_number, "external_id": order_number,
+                "preview": preview, "download_pdf": True,
+                "customer": {
+                    "name": profile["billing_name"], "country": profile["billing_country_code"],
+                    "postal_code": profile["billing_postal_code"], "city": profile["billing_city"],
+                    "address": profile["billing_address"], "email": profile.get("billing_email"),
+                    "send_email": False if preview else profile.get("send_invoice_email") is True,
+                    "tax_subject": profile["tax_subject"], "tax_number": profile.get("tax_number"),
+                    "eu_tax_number": profile.get("eu_vat_number"), "group_tax_number": profile.get("group_tax_number"),
+                },
+                "items": [{"name": line.project_name, "quantity": line.quantity,
+                    "unit": line.unit, "net_unit_price": line.net_unit_price,
+                    "vat_rate": line.vat_code} for line in lines],
+            })
         except ValidationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "The saved billing profile cannot produce a valid invoice. "
-                    "Review its commercial and tax settings."
-                ),
-            ) from exc
-        client_code = str(client.get("client_code") or "client").strip().upper()
-        return invoice, client_code
+            raise HTTPException(409, "The billing profile or project prices cannot produce a valid invoice. Review the saved settings.") from exc
+        return invoice, str(client.get("client_code") or "client").strip().upper()
 
     @classmethod
     async def _fetch_approved_entries(
@@ -880,7 +768,7 @@ class ClientInvoiceService:
         while True:
             query = (
                 supabase.table("timesheets")
-                .select("id, work_date, hours_logged, description, projects(name)")
+                .select("id, project_id, work_date, hours_logged, description, projects(name)")
                 .eq("company_id", str(company_id))
                 .eq("client_id", str(client_id))
                 .eq("status", "approved")
@@ -919,6 +807,7 @@ class ClientInvoiceService:
                 entries.append(
                     InvoiceReviewEntry(
                         id=row.get("id"),
+                        project_id=row.get("project_id"),
                         work_date=row.get("work_date"),
                         hours_logged=hours.quantize(
                             Decimal("0.01"), rounding=ROUND_HALF_UP
@@ -1307,10 +1196,7 @@ class ClientInvoiceService:
             "billing_address",
             "payment_method",
             "invoice_language",
-            "currency",
-            "invoice_unit",
             "vat_code",
-            "invoice_item_name",
         )
         missing = [
             field
@@ -1328,11 +1214,6 @@ class ClientInvoiceService:
             profile.get("billing_email") or ""
         ).strip():
             missing.append("billing_email")
-        price = ClientInvoiceService._decimal_or_none(profile.get("net_unit_price"))
-        if price is None or price < 0:
-            missing.append("net_unit_price")
-        if profile.get("billing_model") not in {"hourly", "fixed_monthly"}:
-            missing.append("billing_model")
         if missing:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
