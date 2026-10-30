@@ -40,17 +40,19 @@ async def build_project_lines(
     # Idempotent recovery if the scheduled New Year rollover has not run yet.
     await supabase.rpc("ensure_company_project_pricing", {"p_company_id": str(company_id)}).execute()
     projects = await _pages(lambda: supabase.table("projects")
-        .select("id,company_id,client_id,name,is_active,payroll_headcount")
+        .select("id,company_id,client_id,name,is_active,is_payroll")
         .eq("company_id", str(company_id)).eq("client_id", str(client_id)).order("id"))
     projects_by_id = {str(p["id"]): p for p in projects}
     quantities = {str(key): Decimal(value) for key, value in project_quantities.items()}
     if set(quantities) - projects_by_id.keys():
         raise HTTPException(409, "A quantity refers to a project outside this client.")
     hours = defaultdict(lambda: Decimal(0))
+    billable_hours = defaultdict(lambda: Decimal(0))
     for entry in entries:
         if entry.project_id is None or str(entry.project_id) not in projects_by_id:
             raise HTTPException(409, "An approved entry has no valid project for this client.")
         hours[str(entry.project_id)] += entry.hours_logged
+        billable_hours[str(entry.project_id)] += entry.hours_logged * entry.billing_multiplier
     selected = set(hours) | {key for key, value in quantities.items() if value > 0}
     if not selected:
         raise HTTPException(404, "No approved time or project quantities were found for this period.")
@@ -71,7 +73,7 @@ async def build_project_lines(
         if unit.strip().casefold() in HOURLY_UNITS:
             if project_id in quantities:
                 raise HTTPException(409, f"Hourly quantity for '{name}' comes from approved time and cannot be overridden.")
-            quantity = hours[project_id] * (project.get("payroll_headcount") or 1)
+            quantity = billable_hours[project_id]
         else:
             quantity = quantities.get(project_id, Decimal(0))
             if quantity <= 0:
@@ -86,7 +88,7 @@ async def build_project_lines(
                 net_unit_price=price["indexed_fee"], vat_rate=vat_code)
             net, vat, gross = calculate_line_totals(item, currency=price["currency"], tax_subject=tax_subject)
             lines.append(InvoiceReviewProjectLine(project_id=project_id, project_name=name,
-                payroll_headcount=project.get("payroll_headcount"),
+                is_payroll=project.get("is_payroll", False),
                 logged_hours=hours[project_id] if unit.strip().casefold() in HOURLY_UNITS else None,
                 pricing_year=price["pricing_year"], pricing_updated_at=price["updated_at"],
                 quantity=quantity, unit=unit, net_unit_price=item.net_unit_price,

@@ -74,7 +74,7 @@ class Database:
 def lines(db, quantities=None, entries=None, start=date(2026, 10, 1), end=date(2026, 10, 31)):
     if entries is None:
         entries = [InvoiceReviewEntry(id=row['id'], project_id=row['project_id'], work_date=row['work_date'],
-            hours_logged=row['hours_logged'], description='Work', project_name=row['projects']['name'])
+            hours_logged=row['hours_logged'], billing_multiplier=row.get('billing_multiplier', 1), description='Work', project_name=row['projects']['name'])
             for row in db.tables['timesheets']]
     return asyncio.run(build_project_lines(db, company_id=COMPANY, client_id=CLIENT,
         period_start=start, period_end=end, entries=entries,
@@ -167,22 +167,24 @@ def test_invoice_api_accepts_quantities_but_rejects_caller_defined_prices():
             period_start='2026-10-01', period_end='2026-10-31', net_unit_price=1)
 
 
-@pytest.mark.parametrize('headcount,quantity', [(None, '2.5'), (1, '2.5'), (12, '30')])
-def test_payroll_multiplies_only_hourly_lines_and_preserves_logged_time(headcount, quantity):
+@pytest.mark.parametrize('multiplier,quantity', [(1, '2.5'), (12, '30')])
+def test_payroll_multiplies_only_hourly_lines_and_preserves_logged_time(multiplier, quantity):
     db = Database()
     for project in db.tables['projects']:
-        project['payroll_headcount'] = headcount
+        project['is_payroll'] = True
+    for row in db.tables['timesheets']:
+        row['billing_multiplier'] = multiplier
     result = lines(db)
     assert result[0].quantity == Decimal(quantity)
     assert result[0].net_total == Decimal(quantity) * 100
     assert result[0].logged_hours == Decimal('2.5')
-    assert result[0].payroll_headcount == headcount
+    assert result[0].is_payroll is True
     assert result[1].quantity == 1  # Monthly quantities are never multiplied.
     assert result[1].logged_hours is None
     assert db.tables['timesheets'][0]['hours_logged'] == '2.5'
 
 
-def test_payroll_headcount_changes_require_review_before_issuing():
+def test_entry_multiplier_changes_require_review_before_issuing():
     db = Database()
     args = dict(user_jwt='fake', company_id=COMPANY, client_id=CLIENT,
         period_start=date(2026,10,1), period_end=date(2026,10,31), project_quantities={MONTHLY: Decimal(1)})
@@ -193,8 +195,22 @@ def test_payroll_headcount_changes_require_review_before_issuing():
         patch.object(ClientInvoiceService, '_assert_live_invoice_mode', AsyncMock()) as live_mode,
     ):
         review, _ = asyncio.run(ClientInvoiceService._build_review_context(**args))
-        db.tables['projects'][0]['payroll_headcount'] = 1  # Even when the total stays identical.
+        db.tables['timesheets'][1]['billing_multiplier'] = 12  # Monthly total stays identical; entry snapshot still changes.
         with pytest.raises(HTTPException) as raised:
             asyncio.run(ClientInvoiceService.issue_client_invoice(**args, review_fingerprint=review.review_fingerprint))
         assert raised.value.status_code == 409
         live_mode.assert_not_awaited()
+
+
+def test_same_project_entries_use_different_factors_and_ignore_legacy_project_headcount():
+    db = Database()
+    db.tables['projects'][0].update(is_payroll=True, payroll_headcount=999)
+    first = db.tables['timesheets'][0]
+    first['billing_multiplier'] = 3
+    db.tables['timesheets'].append(dict(first, id=str(UUID(int=20)), hours_logged='1.25', billing_multiplier=7))
+    result = lines(db)
+    assert result[0].quantity == Decimal('16.25')  # 2.5 × 3 + 1.25 × 7
+    assert result[0].logged_hours == Decimal('3.75')
+    # A later project checkbox change does not recalculate saved entry factors.
+    db.tables['projects'][0]['is_payroll'] = False
+    assert lines(db)[0].quantity == Decimal('16.25')

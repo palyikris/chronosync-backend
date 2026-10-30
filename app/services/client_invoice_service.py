@@ -768,7 +768,7 @@ class ClientInvoiceService:
         while True:
             query = (
                 supabase.table("timesheets")
-                .select("id, project_id, work_date, hours_logged, description, projects(name)")
+                .select("id, project_id, work_date, hours_logged, billing_multiplier, description, projects(name)")
                 .eq("company_id", str(company_id))
                 .eq("client_id", str(client_id))
                 .eq("status", "approved")
@@ -808,6 +808,7 @@ class ClientInvoiceService:
                     InvoiceReviewEntry(
                         id=row.get("id"),
                         project_id=row.get("project_id"),
+                        billing_multiplier=row.get("billing_multiplier", 1),
                         work_date=row.get("work_date"),
                         hours_logged=hours.quantize(
                             Decimal("0.01"), rounding=ROUND_HALF_UP

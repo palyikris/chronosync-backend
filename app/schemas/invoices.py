@@ -269,6 +269,7 @@ class InvoiceReviewEntry(BaseModel):
     project_id: UUID | None = None
     work_date: date
     hours_logged: Decimal
+    billing_multiplier: int = Field(default=1, ge=1, le=2147483647)
     description: str
     project_name: str
 
@@ -276,7 +277,7 @@ class InvoiceReviewEntry(BaseModel):
 class InvoiceReviewProjectLine(BaseModel):
     project_id: UUID
     project_name: str
-    payroll_headcount: int | None = None
+    is_payroll: bool = False
     logged_hours: Decimal | None = None
     pricing_year: int
     pricing_updated_at: datetime

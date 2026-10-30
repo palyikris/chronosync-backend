@@ -299,17 +299,27 @@ authenticated transaction used to finalize all selected client balances atomical
 
 ### Payroll projects
 
-`projects.payroll_headcount` is a positive integer for payroll projects and `NULL`
-for ordinary projects. Hourly invoice quantities and attachment hours use logged
-hours multiplied by this count; saved timesheets and non-hourly invoice quantities
-remain unchanged. Invoice review shows the multiplication and requires a new
-review if the headcount changes. Issued invoices retain their reviewed snapshot.
+`projects.is_payroll` is the project checkbox. Employees choose a positive whole
+number in the create/edit entry modal; `timesheets.billing_multiplier` stores that
+entry's value (default 1). Hourly invoice quantities and attachment hours sum
+`hours_logged × billing_multiplier` for each entry. Logged time and non-hourly
+invoice quantities remain unchanged. Review displays each entry's factor, and
+changing any factor requires a fresh review, even if the aggregate total stays
+the same. Reserved and issued entries cannot change their factor.
 
-Apply the frontend's `20261029193933_add_project_payroll_headcount.sql` before
-the backend's `20261029193936_multiply_payroll_invoice_hours.sql`. The existing
-`20261028100422_invoice_from_project_pricing.sql` is also required for issuance.
-Previously finalized attachments reject changed billable hours and should be
-retrieved from the original archive in that case.
+After the existing payroll migrations, apply these in order:
+
+1. Frontend `20261030130954_move_payroll_multiplier_to_entries.sql`.
+2. Backend `20261030130958_invoice_entry_multipliers.sql`.
+3. Deploy the backend and frontend together with these schema changes.
+
+The frontend migration backfills project flags and existing entry factors from
+`projects.payroll_headcount`, preserving existing billing totals, including
+archived entries. It briefly locks timesheets and restores all trigger modes
+after the metadata backfill. The legacy project headcount column is retained
+only as migration history; new billing never reads it. Future checkbox changes
+do not recalculate stored entry factors. Previously issued invoice snapshots
+and finalized carry-over balances remain unchanged.
 
 The generated workbook is designed to be suitable for client-facing invoice attachments. Each client receives a dedicated worksheet, and the report includes:
 

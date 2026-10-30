@@ -63,12 +63,33 @@ def schema():
     sql((ROOT/'supabase/migrations/20261021000000_harden_invoice_attachment_finalization.sql').read_text())
     sql((FRONTEND/'supabase/migrations/20261029193933_add_project_payroll_headcount.sql').read_text())
     sql((ROOT/'supabase/migrations/20261029193936_multiply_payroll_invoice_hours.sql').read_text())
+    # Migration must also backfill archived entries without triggering edit guards.
+    sql(f"""insert into companies(id) values ('{COMPANY}');
+      insert into profiles(id,company_id,role) values ('{WORKER}','{COMPANY}','employee');
+      insert into clients(id,company_id) values ('{CLIENT}','{COMPANY}');
+      insert into projects(id,company_id,client_id,name,payroll_headcount)
+        values ('{PROJECT}','{COMPANY}','{CLIENT}','Legacy payroll',3);
+      insert into timesheets(id,company_id,client_id,user_id,project_id,work_date,hours_logged)
+        values ('{ENTRY}','{COMPANY}','{CLIENT}','{WORKER}','{PROJECT}','2026-10-15',2.5);
+      update projects set is_active=false;
+      update clients set is_active=false;""")
+    sql((FRONTEND/'supabase/migrations/20261030130954_move_payroll_multiplier_to_entries.sql').read_text())
+    assert sql('select is_payroll from projects').stdout.strip() == 't'
+    assert sql('select billing_multiplier from timesheets').stdout.strip() == '3'
+    assert Decimal(sql('select hours_logged from timesheets').stdout.strip()) == Decimal('2.5')
+    assert sql("select tgenabled from pg_trigger where tgname='enforce_active_client_on_timesheet'").stdout.strip() == 'O'
+    sql((ROOT/'supabase/migrations/20261030130958_invoice_entry_multipliers.sql').read_text())
+    sql("""alter table timesheets add leave_request_id uuid;
+      create table public.leave_requests(user_id uuid, status text, start_date date, end_date date);
+      grant select on public.leave_requests to authenticated;
+      create trigger guard_approved_leave_timesheet before insert or update or delete on timesheets
+        for each row execute function private.guard_approved_leave_timesheet();""")
 
 
 @pytest.fixture(autouse=True)
 def seed(schema):
     if not DSN: return
-    sql(f"""truncate invoice_ledger_entries,invoice_ledger,timesheets,project_pricing,projects,
+    sql(f"""truncate leave_requests,invoice_ledger_entries,invoice_ledger,timesheets,project_pricing,projects,
       client_billing_profiles,clients,profiles,companies cascade;
       insert into companies(id) values ('{COMPANY}'),('{OTHER}');
       insert into profiles(id,company_id,role) values ('{ADMIN}','{COMPANY}','company_admin'),
@@ -87,8 +108,8 @@ def snapshot():
     price = json.loads(sql(f"select row_to_json(p) from project_pricing p where project_id='{PROJECT}'").stdout)
     return {'billing_model': 'project', 'billing_profile_updated_at': '2026-10-22T00:00:00Z',
         'project_quantities': {}, 'approved_entries': [{'id': ENTRY, 'project_id': PROJECT,
-            'work_date': '2026-10-15', 'hours_logged': '2.5', 'description': 'Work', 'project_name': 'Consulting'}],
-        'items': [{'project_id': PROJECT, 'project_name': 'Consulting', 'pricing_year': 2026,
+            'work_date': '2026-10-15', 'hours_logged': '2.5', 'billing_multiplier': 1, 'description': 'Work', 'project_name': 'Consulting'}],
+        'items': [{'is_payroll': False, 'project_id': PROJECT, 'project_name': 'Consulting', 'pricing_year': 2026,
             'pricing_updated_at': price['updated_at'], 'quantity': '2.5', 'unit': price['unit'],
             'net_unit_price': str(price['indexed_fee']), 'vat_code': 'AAM', 'currency': price['currency'],
             'net_total': '250', 'vat_total': '0', 'gross_total': '250'}]}
@@ -243,7 +264,7 @@ def test_every_approved_project_is_required_and_multiline_prices_are_validated()
         f"values ('{entry}','{COMPANY}','{CLIENT}','{WORKER}','{second}','2026-10-15',2,'Work')")
     review=snapshot()
     review['approved_entries'].append(dict(id=entry, project_id=second, work_date='2026-10-15',
-        hours_logged='2',description='Work',project_name='Other work'))
+        hours_logged='2',billing_multiplier=1,description='Work',project_name='Other work'))
     assert reserve(review).returncode != 0
     sql(f"insert into project_pricing(project_id,company_id,pricing_year,indexed_fee,unit,currency) "
         f"values ('{second}','{COMPANY}',2026,50,'óra','HUF')")
@@ -254,36 +275,75 @@ def test_every_approved_project_is_required_and_multiline_prices_are_validated()
     assert result.returncode==0,result.stderr
 
 
-@pytest.mark.parametrize('headcount', [0, -1])
-def test_database_rejects_invalid_payroll_headcount(headcount):
-    result = sql(f"update projects set payroll_headcount={headcount}", check=False)
-    assert result.returncode != 0 and 'projects_payroll_headcount_positive' in result.stderr
+@pytest.mark.parametrize('multiplier', [0, -1, 'null', 2147483648])
+def test_database_rejects_invalid_entry_multiplier(multiplier):
+    sql('update projects set is_payroll=true')
+    result = sql(f"update timesheets set billing_multiplier={multiplier}", check=False)
+    assert result.returncode != 0
 
 
-def test_payroll_invoice_reservation_uses_multiplied_quantity_and_freezes_headcount():
-    sql('update projects set payroll_headcount=12')
+def test_ordinary_projects_cannot_receive_a_multiplier_above_one():
+    result = sql('update timesheets set billing_multiplier=3', WORKER, check=False)
+    assert result.returncode != 0 and 'only available for payroll projects' in result.stderr
+
+
+def test_payroll_invoice_reservation_freezes_the_entry_multiplier():
+    sql('update projects set is_payroll=true; update timesheets set billing_multiplier=12')
     review = snapshot()
-    review['items'][0].update(payroll_headcount=12, quantity='30', net_total='3000', gross_total='3000')
+    review['approved_entries'][0]['billing_multiplier'] = 12
+    review['items'][0].update(is_payroll=True, quantity='30', net_total='3000', gross_total='3000')
     result = reserve(review, net='3000')
     assert result.returncode == 0, result.stderr
     assert Decimal(sql('select hours_logged from timesheets').stdout.strip()) == Decimal('2.5')
-    sql('update projects set payroll_headcount=20')
-    saved = json.loads(sql("select invoice_snapshot->'items'->0 from invoice_ledger").stdout)
-    assert saved['payroll_headcount'] == 12 and saved['quantity'] == '30'
+    changed = sql('update timesheets set billing_multiplier=20', check=False)
+    assert changed.returncode != 0 and 'reserved for an invoice' in changed.stderr
+    # Preserve the hosted non-retryable conflict code when freezing a factor.
+    sql("""do $$ begin
+      update timesheets set billing_multiplier=20;
+      raise exception 'A reserved multiplier unexpectedly changed';
+    exception when sqlstate 'PT409' then null;
+    end $$;""")
+    sql('update projects set is_payroll=false, payroll_headcount=999')
+    saved = json.loads(sql("select invoice_snapshot from invoice_ledger").stdout)
+    assert saved['approved_entries'][0]['billing_multiplier'] == 12
+    assert saved['items'][0]['quantity'] == '30'
+    invoice_id = result.stdout.strip()
+    sql(f"select * from finalize_manual_invoice('{invoice_id}','TEST-FACTOR-1',3000,3000,'JVBERi1saXZl')", ADMIN)
+    assert sql('select status from timesheets').stdout.strip() == 'invoiced'
+    assert sql('update timesheets set billing_multiplier=1', check=False).returncode != 0
 
 
-def test_payroll_invoice_rejects_tampered_quantity_and_changed_headcount():
+def test_payroll_invoice_rejects_tampered_quantity_and_changed_entry_factor():
+    sql('update projects set is_payroll=true')
     review = snapshot()
-    sql('update projects set payroll_headcount=1')
-    assert reserve(review).returncode != 0  # Same total, but the reviewed payroll flag changed.
-    sql('update projects set payroll_headcount=12')
-    review['items'][0]['payroll_headcount'] = 12
+    review['items'][0]['is_payroll'] = True
+    sql('update timesheets set billing_multiplier=12')
+    assert reserve(review).returncode != 0  # Factor changed after review.
+    review['approved_entries'][0]['billing_multiplier'] = 12
     assert reserve(review).returncode != 0  # Unmultiplied quantity is forbidden.
     assert sql('select count(*) from invoice_ledger').stdout.strip() == '0'
 
 
-def test_payroll_attachment_finalization_matches_multiplied_workbook_hours():
-    sql('update projects set payroll_headcount=12')
+def test_distinct_entry_factors_are_summed_and_swapping_them_requires_review():
+    second = '50000000-0000-4000-8000-000000000002'
+    sql(f"""update projects set is_payroll=true;
+      update timesheets set billing_multiplier=3;
+      insert into timesheets(id,company_id,client_id,user_id,project_id,work_date,hours_logged,description,billing_multiplier)
+        values ('{second}','{COMPANY}','{CLIENT}','{WORKER}','{PROJECT}','2026-10-15',2.5,'Work',7);""")
+    review = snapshot()
+    review['approved_entries'][0]['billing_multiplier'] = 3
+    review['approved_entries'].append(dict(review['approved_entries'][0], id=second, billing_multiplier=7))
+    review['items'][0].update(is_payroll=True, quantity='25', net_total='2500', gross_total='2500')
+    # Keep the same aggregate total, but change the distribution across entries.
+    sql('update timesheets set billing_multiplier=10-billing_multiplier')
+    assert reserve(review, net='2500').returncode != 0
+    sql('update timesheets set billing_multiplier=10-billing_multiplier')
+    result = reserve(review, net='2500')
+    assert result.returncode == 0, result.stderr
+
+
+def test_payroll_attachment_finalization_matches_entry_factors_and_project_changes():
+    sql('update projects set is_payroll=true; update timesheets set billing_multiplier=12; update projects set is_payroll=false')
     updates = json.dumps([dict(client_id=CLIENT, starting_hours=2, available_hours=100,
         used_hours=30, remaining_hours=72)])
     query = f"select * from finalize_invoice_attachment_period('{COMPANY}','2026-10-01','2026-10-31','{updates}')"
@@ -291,3 +351,10 @@ def test_payroll_attachment_finalization_matches_multiplied_workbook_hours():
     assert Decimal(sql('select hours_from_previous_month from clients').stdout.strip()) == 72
     assert 'f' in sql(query, ADMIN).stdout  # Re-download never applies carry-over twice.
     assert Decimal(sql('select hours_from_previous_month from clients').stdout.strip()) == 72
+
+
+def test_multiplier_only_edits_respect_leave_locks():
+    sql(f"""update projects set is_payroll=true;
+      insert into leave_requests values ('{WORKER}','APPROVED','2026-10-15','2026-10-15');""")
+    result = sql('update timesheets set billing_multiplier=3', WORKER, check=False)
+    assert result.returncode != 0 and 'locked by approved leave' in result.stderr
