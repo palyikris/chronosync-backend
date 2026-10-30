@@ -79,6 +79,7 @@ def schema():
     assert Decimal(sql('select hours_logged from timesheets').stdout.strip()) == Decimal('2.5')
     assert sql("select tgenabled from pg_trigger where tgname='enforce_active_client_on_timesheet'").stdout.strip() == 'O'
     sql((ROOT/'supabase/migrations/20261030130958_invoice_entry_multipliers.sql').read_text())
+    sql((ROOT/'supabase/migrations/20261030142034_fix_attachment_conflict_retry.sql').read_text())
     sql("""alter table timesheets add leave_request_id uuid;
       create table public.leave_requests(user_id uuid, status text, start_date date, end_date date);
       grant select on public.leave_requests to authenticated;
@@ -351,6 +352,27 @@ def test_payroll_attachment_finalization_matches_entry_factors_and_project_chang
     assert Decimal(sql('select hours_from_previous_month from clients').stdout.strip()) == 72
     assert 'f' in sql(query, ADMIN).stdout  # Re-download never applies carry-over twice.
     assert Decimal(sql('select hours_from_previous_month from clients').stdout.strip()) == 72
+
+
+@pytest.mark.parametrize('already_finalized', [False, True])
+def test_stale_multiplier_attachment_returns_nonretryable_conflict(already_finalized):
+    sql('update projects set is_payroll=true; update timesheets set billing_multiplier=12')
+    updates = [dict(client_id=CLIENT, starting_hours=2, available_hours=100,
+        used_hours=30, remaining_hours=72)]
+    def command(values):
+        return f"public.finalize_invoice_attachment_period('{COMPANY}','2026-10-01','2026-10-31','{json.dumps(values)}')"
+    if already_finalized:
+        sql('select * from ' + command(updates), ADMIN)
+    # Simulate an attachment built before an entry's multiplier changed.
+    updates[0].update(used_hours=25, remaining_hours=77)
+    sql(f"""do $$ begin
+      perform * from {command(updates)};
+      raise exception 'A stale multiplier attachment unexpectedly finalized';
+    exception when sqlstate 'PT409' then null;
+    end $$;""", ADMIN)
+    expected = 72 if already_finalized else 2
+    assert Decimal(sql('select hours_from_previous_month from clients').stdout.strip()) == expected
+    assert sql('select count(*) from invoice_attachment_periods').stdout.strip() == str(int(already_finalized))
 
 
 def test_multiplier_only_edits_respect_leave_locks():
