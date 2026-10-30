@@ -165,3 +165,36 @@ def test_invoice_api_accepts_quantities_but_rejects_caller_defined_prices():
     with pytest.raises(ValidationError):
         ClientInvoiceReviewRequest(company_id=COMPANY, client_id=CLIENT,
             period_start='2026-10-01', period_end='2026-10-31', net_unit_price=1)
+
+
+@pytest.mark.parametrize('headcount,quantity', [(None, '2.5'), (1, '2.5'), (12, '30')])
+def test_payroll_multiplies_only_hourly_lines_and_preserves_logged_time(headcount, quantity):
+    db = Database()
+    for project in db.tables['projects']:
+        project['payroll_headcount'] = headcount
+    result = lines(db)
+    assert result[0].quantity == Decimal(quantity)
+    assert result[0].net_total == Decimal(quantity) * 100
+    assert result[0].logged_hours == Decimal('2.5')
+    assert result[0].payroll_headcount == headcount
+    assert result[1].quantity == 1  # Monthly quantities are never multiplied.
+    assert result[1].logged_hours is None
+    assert db.tables['timesheets'][0]['hours_logged'] == '2.5'
+
+
+def test_payroll_headcount_changes_require_review_before_issuing():
+    db = Database()
+    args = dict(user_jwt='fake', company_id=COMPANY, client_id=CLIENT,
+        period_start=date(2026,10,1), period_end=date(2026,10,31), project_quantities={MONTHLY: Decimal(1)})
+    with (
+        patch.object(SupabaseDataService, 'get_authenticated_client', AsyncMock(return_value=db)),
+        patch.object(SupabaseDataService, '_close_authenticated_client', AsyncMock()),
+        patch.object(SupabaseDataService, '_assert_invoice_attachment_access_with_client', AsyncMock()),
+        patch.object(ClientInvoiceService, '_assert_live_invoice_mode', AsyncMock()) as live_mode,
+    ):
+        review, _ = asyncio.run(ClientInvoiceService._build_review_context(**args))
+        db.tables['projects'][0]['payroll_headcount'] = 1  # Even when the total stays identical.
+        with pytest.raises(HTTPException) as raised:
+            asyncio.run(ClientInvoiceService.issue_client_invoice(**args, review_fingerprint=review.review_fingerprint))
+        assert raised.value.status_code == 409
+        live_mode.assert_not_awaited()

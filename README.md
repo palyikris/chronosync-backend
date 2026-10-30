@@ -297,6 +297,20 @@ authenticated transaction used to finalize all selected client balances atomical
 
 ## Report Generation Details
 
+### Payroll projects
+
+`projects.payroll_headcount` is a positive integer for payroll projects and `NULL`
+for ordinary projects. Hourly invoice quantities and attachment hours use logged
+hours multiplied by this count; saved timesheets and non-hourly invoice quantities
+remain unchanged. Invoice review shows the multiplication and requires a new
+review if the headcount changes. Issued invoices retain their reviewed snapshot.
+
+Apply the frontend's `20261029193933_add_project_payroll_headcount.sql` before
+the backend's `20261029193936_multiply_payroll_invoice_hours.sql`. The existing
+`20261028100422_invoice_from_project_pricing.sql` is also required for issuance.
+Previously finalized attachments reject changed billable hours and should be
+retrieved from the original archive in that case.
+
 The generated workbook is designed to be suitable for client-facing invoice attachments. Each client receives a dedicated worksheet, and the report includes:
 
 - client name,

@@ -40,7 +40,7 @@ async def build_project_lines(
     # Idempotent recovery if the scheduled New Year rollover has not run yet.
     await supabase.rpc("ensure_company_project_pricing", {"p_company_id": str(company_id)}).execute()
     projects = await _pages(lambda: supabase.table("projects")
-        .select("id,company_id,client_id,name,is_active")
+        .select("id,company_id,client_id,name,is_active,payroll_headcount")
         .eq("company_id", str(company_id)).eq("client_id", str(client_id)).order("id"))
     projects_by_id = {str(p["id"]): p for p in projects}
     quantities = {str(key): Decimal(value) for key, value in project_quantities.items()}
@@ -71,7 +71,7 @@ async def build_project_lines(
         if unit.strip().casefold() in HOURLY_UNITS:
             if project_id in quantities:
                 raise HTTPException(409, f"Hourly quantity for '{name}' comes from approved time and cannot be overridden.")
-            quantity = hours[project_id]
+            quantity = hours[project_id] * (project.get("payroll_headcount") or 1)
         else:
             quantity = quantities.get(project_id, Decimal(0))
             if quantity <= 0:
@@ -86,6 +86,8 @@ async def build_project_lines(
                 net_unit_price=price["indexed_fee"], vat_rate=vat_code)
             net, vat, gross = calculate_line_totals(item, currency=price["currency"], tax_subject=tax_subject)
             lines.append(InvoiceReviewProjectLine(project_id=project_id, project_name=name,
+                payroll_headcount=project.get("payroll_headcount"),
+                logged_hours=hours[project_id] if unit.strip().casefold() in HOURLY_UNITS else None,
                 pricing_year=price["pricing_year"], pricing_updated_at=price["updated_at"],
                 quantity=quantity, unit=unit, net_unit_price=item.net_unit_price,
                 vat_code=item.vat_rate, currency=price["currency"], net_total=net, vat_total=vat, gross_total=gross))

@@ -276,6 +276,8 @@ class InvoiceReviewEntry(BaseModel):
 class InvoiceReviewProjectLine(BaseModel):
     project_id: UUID
     project_name: str
+    payroll_headcount: int | None = None
+    logged_hours: Decimal | None = None
     pricing_year: int
     pricing_updated_at: datetime
     quantity: Decimal

@@ -243,7 +243,7 @@ class SupabaseDataService:
                 supabase.table("timesheets")
                 .select(
                     "id, company_id, client_id, work_date, hours_logged, "
-                    "description, projects(name), "
+                    "description, projects(name, payroll_headcount), "
                     "clients!inner(id, client_code, name, company_id, is_active, "
                     "invoice_attachment_language, available_hours_per_month, "
                     "hours_from_previous_month)"
@@ -352,7 +352,7 @@ class SupabaseDataService:
             hours_from_previous_month = cls._quantize_hours(
                 cls._decimal_or_zero(client_data.get("hours_from_previous_month"))
             )
-            rounded_hours = cls._quantize_hours(raw_hours)
+            rounded_hours = cls._quantize_hours(raw_hours) * (project_data.get("payroll_headcount") or 1)
 
             if client_id not in clients_map:
                 clients_map[client_id] = {

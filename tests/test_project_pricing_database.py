@@ -20,7 +20,9 @@ ENTRY = '50000000-0000-4000-8000-000000000001'
 
 
 def sql(query, identity=None, check=True):
-    assert 'host=/tmp/chronosync-invoice-audit' in DSN and 'dbname=project_pricing_audit' in DSN
+    local_host = 'host=/tmp/chronosync-invoice-audit' in DSN or (
+        'host=127.0.0.1' in DSN and 'port=55439' in DSN)
+    assert local_host and 'dbname=project_pricing_audit' in DSN
     prefix = f"set request.jwt.claim.sub='{identity}'; set role authenticated;" if identity else ''
     result = subprocess.run(['psql', DSN, '-XAtq', '-v', 'ON_ERROR_STOP=1'],
         input=prefix+query, text=True, capture_output=True, timeout=15)
@@ -57,6 +59,10 @@ def schema():
         sql((FRONTEND/'supabase/migrations'/name).read_text())
     sql((ROOT/'supabase/migrations/20261028100422_invoice_from_project_pricing.sql').read_text())
     sql((ROOT/'supabase/migrations/20261028101844_annual_project_price_indexing.sql').read_text())
+    sql("alter table clients add available_hours_per_month numeric default 100, add hours_from_previous_month numeric default 2;")
+    sql((ROOT/'supabase/migrations/20261021000000_harden_invoice_attachment_finalization.sql').read_text())
+    sql((FRONTEND/'supabase/migrations/20261029193933_add_project_payroll_headcount.sql').read_text())
+    sql((ROOT/'supabase/migrations/20261029193936_multiply_payroll_invoice_hours.sql').read_text())
 
 
 @pytest.fixture(autouse=True)
@@ -246,3 +252,42 @@ def test_every_approved_project_is_required_and_multiline_prices_are_validated()
         pricing_updated_at=price['updated_at'],quantity='2',net_unit_price='50',net_total='100',gross_total='100'))
     result=reserve(review,net='350')
     assert result.returncode==0,result.stderr
+
+
+@pytest.mark.parametrize('headcount', [0, -1])
+def test_database_rejects_invalid_payroll_headcount(headcount):
+    result = sql(f"update projects set payroll_headcount={headcount}", check=False)
+    assert result.returncode != 0 and 'projects_payroll_headcount_positive' in result.stderr
+
+
+def test_payroll_invoice_reservation_uses_multiplied_quantity_and_freezes_headcount():
+    sql('update projects set payroll_headcount=12')
+    review = snapshot()
+    review['items'][0].update(payroll_headcount=12, quantity='30', net_total='3000', gross_total='3000')
+    result = reserve(review, net='3000')
+    assert result.returncode == 0, result.stderr
+    assert Decimal(sql('select hours_logged from timesheets').stdout.strip()) == Decimal('2.5')
+    sql('update projects set payroll_headcount=20')
+    saved = json.loads(sql("select invoice_snapshot->'items'->0 from invoice_ledger").stdout)
+    assert saved['payroll_headcount'] == 12 and saved['quantity'] == '30'
+
+
+def test_payroll_invoice_rejects_tampered_quantity_and_changed_headcount():
+    review = snapshot()
+    sql('update projects set payroll_headcount=1')
+    assert reserve(review).returncode != 0  # Same total, but the reviewed payroll flag changed.
+    sql('update projects set payroll_headcount=12')
+    review['items'][0]['payroll_headcount'] = 12
+    assert reserve(review).returncode != 0  # Unmultiplied quantity is forbidden.
+    assert sql('select count(*) from invoice_ledger').stdout.strip() == '0'
+
+
+def test_payroll_attachment_finalization_matches_multiplied_workbook_hours():
+    sql('update projects set payroll_headcount=12')
+    updates = json.dumps([dict(client_id=CLIENT, starting_hours=2, available_hours=100,
+        used_hours=30, remaining_hours=72)])
+    query = f"select * from finalize_invoice_attachment_period('{COMPANY}','2026-10-01','2026-10-31','{updates}')"
+    assert 't' in sql(query, ADMIN).stdout
+    assert Decimal(sql('select hours_from_previous_month from clients').stdout.strip()) == 72
+    assert 'f' in sql(query, ADMIN).stdout  # Re-download never applies carry-over twice.
+    assert Decimal(sql('select hours_from_previous_month from clients').stdout.strip()) == 72
