@@ -36,7 +36,8 @@ create table public.timesheets(id uuid primary key default gen_random_uuid(), us
   company_id uuid references companies, client_id uuid references clients, project_id uuid references projects,
   work_date date not null, hours_logged numeric not null, description text,
   status timesheet_entry_status not null default 'draft', approved_by uuid references auth.users,
-  approved_at timestamptz, created_at timestamptz not null default now());
+  approved_at timestamptz, submitted_at timestamptz, rejection_reason text,
+  billing_multiplier integer not null default 1, created_at timestamptz not null default now());
 create table public.leave_requests(id uuid primary key default gen_random_uuid(), user_id uuid references profiles,
   company_id uuid references companies, start_date date not null, end_date date not null,
   status text not null default 'PENDING' check (status in ('PENDING','APPROVED','REJECTED')),

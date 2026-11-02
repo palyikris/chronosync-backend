@@ -51,7 +51,8 @@ def schema():
         '20261027133954_secure_tenant_boundaries.sql',
         '20261027141923_protect_approved_leave_cancellation.sql',
         '20261027133957_trusted_invitations_and_atomic_leave.sql',
-        '20261027132449_recover_existing_invoice_pdf.sql']:
+        '20261027132449_recover_existing_invoice_pdf.sql',
+        '20261102125349_allow_submitted_timesheet_withdrawal.sql']:
         sql((ROOT/'supabase/migrations'/name).read_text())
         if name.endswith('_protect_approved_leave_cancellation.sql'):
             # Core isolation can ship before the new backend/UI. Existing
@@ -171,6 +172,51 @@ def test_employees_cannot_self_approve_or_move_timesheets():
     sql("update timesheets set status='submitted'", EMPLOYEE, 'authenticated')
     sql("update timesheets set status='approved'", ADMIN, 'authenticated')
     denied("update timesheets set status='invoiced'", ADMIN)
+
+
+def test_employee_can_withdraw_and_resubmit_own_submitted_hours():
+    entry_id = sql(f"""insert into timesheets(user_id,company_id,work_date,hours_logged,description,status,submitted_at)
+      values ('{EMPLOYEE}','{A}','2026-11-10',2,'Original work','submitted',now()) returning id""").stdout.strip()
+    result = sql(f"""update timesheets set status='draft',submitted_at=null
+      where id='{entry_id}' and status='submitted' returning status""", EMPLOYEE, 'authenticated')
+    assert result.stdout.strip() == 'draft'
+    assert sql(f"select submitted_at is null from timesheets where id='{entry_id}'").stdout.strip() == 't'
+    sql(f"update timesheets set description='Corrected work' where id='{entry_id}'", EMPLOYEE, 'authenticated')
+    result = sql(f"""update timesheets set status='submitted',submitted_at=now()
+      where id='{entry_id}' and status='draft' returning status""", EMPLOYEE, 'authenticated')
+    assert result.stdout.strip() == 'submitted'
+
+
+@pytest.mark.parametrize('change', [
+    "hours_logged=9", "description='Changed work'", "work_date='2026-11-11'", 'billing_multiplier=9',
+    "status='draft',submitted_at=null,hours_logged=9",
+    "status='draft',submitted_at=null,rejection_reason='Forged review'",
+    "status='draft',submitted_at=null,created_at=now()+interval '1 day'",
+    "status='draft'", "submitted_at=null", "status='approved'",
+])
+def test_submitted_hours_must_be_withdrawn_without_other_changes(change):
+    sql(f"""insert into timesheets(user_id,company_id,work_date,hours_logged,status,submitted_at)
+      values ('{EMPLOYEE}','{A}','2026-11-10',2,'submitted',now())""")
+    denied(f'update timesheets set {change}')
+    assert sql("select status||':'||hours_logged::text from timesheets").stdout.strip() == 'submitted:2'
+
+
+@pytest.mark.parametrize('actor,owner', [(EMPLOYEE, ADMIN), (OTHER, EMPLOYEE), (INACTIVE, INACTIVE)])
+def test_withdrawal_cannot_change_another_owners_or_inactive_members_entries(actor, owner):
+    sql(f"""insert into timesheets(user_id,company_id,work_date,hours_logged,status,submitted_at)
+      values ('{owner}','{A}','2026-11-10',2,'submitted',now())""")
+    result = sql("update timesheets set status='draft',submitted_at=null returning id", actor, 'authenticated')
+    assert result.stdout.strip() == ''
+    assert sql('select status from timesheets').stdout.strip() == 'submitted'
+
+
+@pytest.mark.parametrize('status', ['approved', 'invoiced'])
+def test_employee_cannot_withdraw_reviewed_entries(status):
+    sql(f"""insert into timesheets(user_id,company_id,work_date,hours_logged,status)
+      values ('{EMPLOYEE}','{A}','2026-11-10',2,'{status}')""")
+    result = sql("update timesheets set status='draft',submitted_at=null returning id", EMPLOYEE, 'authenticated')
+    assert result.stdout.strip() == ''
+    assert sql('select status from timesheets').stdout.strip() == status
 
 
 def prepare(email='new@test.invalid', company=A, role='regular', actor=ADMIN, check=True):
