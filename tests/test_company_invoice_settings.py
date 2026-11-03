@@ -61,6 +61,9 @@ class InvoiceSettingsClient:
         if table_name == "companies":
             return FakeQuery(
                 {
+                    "enabled_modules": ["leave_attachments", "invoicing"],
+                    "is_active": True,
+                    "is_deleted": False,
                     "invoice_provider": self.provider,
                     "invoice_api_key_encrypted": self.encrypted_key,
                 }

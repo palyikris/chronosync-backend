@@ -86,6 +86,7 @@ class CompanyCredentialService:
                 supabase,
                 user_jwt=user_jwt,
                 company_id=company_id,
+                required_module="invoicing",
             )
             current_provider, _current_encrypted_key = await cls._get_stored_config(
                 supabase, company_id
@@ -161,6 +162,7 @@ class CompanyCredentialService:
                 supabase,
                 user_jwt=user_jwt,
                 company_id=company_id,
+                required_module="invoicing",
             )
             provider, encrypted_key = await cls._get_stored_config(supabase, company_id)
             if provider not in {"szamlazz_hu", "billingo"}:
@@ -202,6 +204,7 @@ class CompanyCredentialService:
                 supabase,
                 user_jwt=user_jwt,
                 company_id=company_id,
+                required_module="invoicing",
             )
             provider, encrypted_key = await cls._get_stored_config(supabase, company_id)
             if provider != "szamlazz_hu":

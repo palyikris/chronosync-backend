@@ -113,6 +113,8 @@ def test_invoice_attachment_access_requires_an_active_company_admin():
             self.profile = profile
 
         def table(self, table_name):
+            if table_name == "companies":
+                return ProfileQuery({"enabled_modules": ["leave_attachments"], "is_active": True, "is_deleted": False})
             assert table_name == "profiles"
             return ProfileQuery(self.profile)
 

@@ -101,7 +101,7 @@ class ClientInvoiceService:
         supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
             await SupabaseDataService._assert_invoice_attachment_access_with_client(
-                supabase, user_jwt=user_jwt, company_id=company_id
+                supabase, user_jwt=user_jwt, company_id=company_id, required_module="invoicing"
             )
             client, profile = await cls._load_client_and_profile(
                 supabase, company_id=company_id, client_id=client_id
@@ -425,7 +425,7 @@ class ClientInvoiceService:
         supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
             await SupabaseDataService._assert_invoice_attachment_access_with_client(
-                supabase, user_jwt=user_jwt, company_id=company_id
+                supabase, user_jwt=user_jwt, company_id=company_id, required_module="invoicing"
             )
             await supabase.rpc(
                 "expire_stale_manual_invoice_attempts",
@@ -464,7 +464,7 @@ class ClientInvoiceService:
         supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
             await SupabaseDataService._assert_invoice_attachment_access_with_client(
-                supabase, user_jwt=user_jwt, company_id=company_id
+                supabase, user_jwt=user_jwt, company_id=company_id, required_module="invoicing"
             )
             response = await (
                 supabase.table("invoice_ledger")
@@ -496,7 +496,7 @@ class ClientInvoiceService:
         supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
             await SupabaseDataService._assert_invoice_attachment_access_with_client(
-                supabase, user_jwt=user_jwt, company_id=company_id
+                supabase, user_jwt=user_jwt, company_id=company_id, required_module="invoicing"
             )
             response = await (
                 supabase.table("invoice_ledger")
@@ -682,7 +682,7 @@ class ClientInvoiceService:
         supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
             await SupabaseDataService._assert_invoice_attachment_access_with_client(
-                supabase, user_jwt=user_jwt, company_id=company_id
+                supabase, user_jwt=user_jwt, company_id=company_id, required_module="invoicing"
             )
             response = await (
                 supabase.table("companies")

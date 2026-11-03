@@ -34,6 +34,35 @@ This makes the backend a bridge between operational data in Supabase and busines
 
 ## Architecture
 
+### Optional company modules
+
+The base application provides timesheets and review, supported by shared company,
+user, client and project administration. Optional features use the persisted
+`companies.enabled_modules` list, managed only by super administrators:
+
+- `leave_attachments`: leave requests/configuration and invoice attachment exports.
+- `invoicing`: billing profiles, project pricing/indexing, provider configuration,
+  previews/review, live invoice issuance, history/PDFs and reconciliation. Requires
+  `leave_attachments`.
+
+Apply `supabase/migrations/20261103175015_company_modules.sql` after the existing
+migrations in both repositories, before deploying the updated backend/frontend.
+Existing companies retain both modules; new companies default to an empty list
+(base only). Disabling modules does not delete data or provider credentials.
+Existing approved leave still locks its dates in core timesheets. Resolve issuing
+or uncertain invoices before disabling invoicing.
+
+`app/modules/access.py` checks company modules on the caller's authenticated
+Supabase client after the existing administrator/scope checks. Invoice operations
+require `invoicing`; attachment generation requires `leave_attachments`.
+PostgreSQL enforces the same boundary for direct RPCs and pricing/ledger access,
+and scheduled annual price rollover skips companies without invoicing.
+
+Run `python -X utf8 -m pytest -q` for backend regressions. For the disposable
+database module tests, use `MODULES_TEST_PG_DSN` with
+`host=127.0.0.1 port=55440 dbname=modules_audit user=postgres`; that database is
+reset by the tests. Never point this fixture at a hosted database.
+
 The project is structured around a small set of clearly separated responsibilities:
 
 - API layer: exposes the endpoints consumed by the frontend or other services

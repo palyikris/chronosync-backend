@@ -12,6 +12,7 @@ from postgrest.exceptions import APIError
 from supabase import AsyncClient, acreate_client
 
 from app.core.config import settings
+from app.modules.access import ModuleId, require_company_module
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,7 @@ class SupabaseDataService:
         supabase: Any,
         user_jwt: str,
         company_id: UUID | str,
+        required_module: ModuleId = "leave_attachments",
     ) -> None:
         """Require an active company administrator before returning invoice data."""
         try:
@@ -214,6 +216,8 @@ class SupabaseDataService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invoice attachments are restricted to company administrators.",
             )
+
+        await require_company_module(supabase, company_id, required_module)
 
     @classmethod
     async def _fetch_aggregated_timesheets_with_client(
