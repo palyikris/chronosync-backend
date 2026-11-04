@@ -8,6 +8,8 @@ from app.schemas.invoices import (
     ClientInvoicePreviewRequest,
     ClientInvoiceReview,
     ClientInvoiceReviewRequest,
+    InvoiceBatchReviewItem,
+    InvoiceBatchReviewRequest,
     InvoiceCreateRequest,
     InvoiceHistoryItem,
     InvoicePreviewRequest,
@@ -15,12 +17,12 @@ from app.schemas.invoices import (
 )
 from app.services.client_invoice_service import ClientInvoiceService
 from app.services.company_service import CompanyCredentialService
+from app.services.invoice_batch_service import InvoiceBatchService
 from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuError,
     SzamlazzHuProvider,
     SzamlazzHuRejectedError,
 )
-
 
 router = APIRouter()
 
@@ -141,6 +143,14 @@ async def review_client_invoice(
         period_end=payload.period_end,
         project_quantities=payload.project_quantities,
     )
+
+
+@router.post("/batch-review", response_model=list[InvoiceBatchReviewItem])
+async def review_invoice_batch(
+    payload: InvoiceBatchReviewRequest,
+    token: str = Depends(extract_bearer_token),
+) -> list[InvoiceBatchReviewItem]:
+    return await InvoiceBatchService.review(user_jwt=token, payload=payload)
 
 
 @router.post("/client-issue", response_model=InvoiceHistoryItem)

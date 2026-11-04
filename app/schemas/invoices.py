@@ -6,7 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
 InvoiceLanguage = Literal[
     "hu",
     "en",
@@ -325,6 +324,30 @@ class ClientInvoiceReview(BaseModel):
 class ClientInvoiceIssueRequest(ClientInvoiceReviewRequest):
     review_fingerprint: str = Field(min_length=64, max_length=64)
     confirm: Literal[True]
+
+
+class InvoiceBatchReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    company_id: UUID
+    client_ids: list[UUID] = Field(min_length=1, max_length=100)
+    period_start: date
+    period_end: date
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> Self:
+        if len(self.client_ids) != len(set(self.client_ids)):
+            raise ValueError("client_ids must not contain duplicates")
+        if self.period_end < self.period_start:
+            raise ValueError("period_end must be on or after period_start")
+        if (self.period_end - self.period_start).days > 366:
+            raise ValueError("invoice periods cannot exceed 366 days")
+        return self
+
+
+class InvoiceBatchReviewItem(BaseModel):
+    client_id: UUID
+    review: ClientInvoiceReview | None = None
+    reason: str | None = None
 
 
 InvoiceLedgerStatus = Literal["issuing", "issued", "uncertain", "failed"]

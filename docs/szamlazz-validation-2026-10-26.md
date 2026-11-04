@@ -1,5 +1,7 @@
 **Számlázz.hu invoice validation — 26 October 2026**
 
+Follow-up: the [27 October review](szamlazz-validation-2026-10-27.md) records actual test-account invoice/PDF checks and additional transport fixes. The observations below remain the historical 26 October assessment.
+
 The original “ready in theory” assessment was too optimistic. The audit reproduced a production finalization failure and found several gaps in concurrency, response classification and recovery. Those defects now have local fixes and regression tests. Production readiness is still pending deployment and an actual Számlázz.hu test-account run. No invoice request was sent to a provider account during this audit.
 
 **Evidence and scope**
