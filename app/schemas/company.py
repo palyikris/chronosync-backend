@@ -34,6 +34,14 @@ class InvoiceProviderConfigResponse(BaseModel):
     api_key_configured: bool
 
 
+class InvoiceConnectionTestResponse(BaseModel):
+    success: bool
+    status: Literal[
+        "connected", "invalid_key", "provider_error", "unavailable", "unconfirmed"
+    ]
+    provider_error_code: str | None = None
+
+
 class SzamlazzKeyRequest(BaseModel):
     company_id: UUID = Field(..., description="Company receiving the credential")
     agent_key: SecretStr = Field(

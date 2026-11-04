@@ -11,6 +11,12 @@ from app.core.config import settings
 from app.schemas.company import InvoiceProviderConfigRequest
 from app.services.company_service import CompanyCredentialService
 from app.services.supabase_service import SupabaseDataService
+from app.services.invoice_providers.szamlazz_hu import (
+    SzamlazzHuProvider,
+    SzamlazzHuRejectedError,
+    SzamlazzHuRequestError,
+    SzamlazzHuResponseError,
+)
 
 
 COMPANY_ID = "10000000-0000-0000-0000-000000000001"
@@ -175,3 +181,110 @@ def test_invoice_settings_endpoint_returns_json_expected_by_frontend():
         )
 
     assert response.model_dump() == saved
+
+
+@pytest.mark.parametrize("entered_key", [None, " NEW-Key "])
+def test_connection_uses_saved_or_entered_key_without_saving(entered_key):
+    encryption_key = Fernet.generate_key()
+    encrypted = Fernet(encryption_key).encrypt(b"saved-key").decode()
+    client = InvoiceSettingsClient(encrypted_key=encrypted)
+    close_client = AsyncMock()
+    ping = AsyncMock(return_value=None)
+
+    with (
+        patch.object(settings, "ENCRYPTION_MASTER_KEY", encryption_key.decode()),
+        patch.object(SupabaseDataService, "get_authenticated_client", AsyncMock(return_value=client)),
+        patch.object(SupabaseDataService, "_close_authenticated_client", close_client),
+        patch("app.services.company_service.SzamlazzHuProvider") as provider,
+    ):
+        provider.return_value.test_connection = ping
+        result = asyncio.run(CompanyCredentialService.test_invoice_connection(
+            TOKEN, COMPANY_ID, "szamlazz_hu", entered_key
+        ))
+
+    assert result.model_dump() == {
+        "success": True, "status": "connected", "provider_error_code": None
+    }
+    provider.assert_called_once_with("NEW-Key" if entered_key else "saved-key")
+    ping.assert_awaited_once()
+    close_client.assert_awaited_once_with(client)
+    assert client.rpc_params is None and client.encrypted_key == encrypted
+
+
+@pytest.mark.parametrize("entered_key", [None, "unsaved-key"])
+def test_connection_rejects_other_company_before_contacting_provider(entered_key):
+    client = InvoiceSettingsClient()
+    close_client = AsyncMock()
+    with (
+        patch.object(settings, "ENCRYPTION_MASTER_KEY", Fernet.generate_key().decode()),
+        patch.object(SupabaseDataService, "get_authenticated_client", AsyncMock(return_value=client)),
+        patch.object(SupabaseDataService, "_close_authenticated_client", close_client),
+        patch.object(SzamlazzHuProvider, "test_connection", AsyncMock()) as ping,
+        pytest.raises(HTTPException) as error,
+    ):
+        asyncio.run(CompanyCredentialService.test_invoice_connection(
+            TOKEN, "10000000-0000-0000-0000-000000000002", "szamlazz_hu", entered_key
+        ))
+    assert error.value.status_code == 403
+    ping.assert_not_awaited()
+    close_client.assert_awaited_once_with(client)
+
+
+@pytest.mark.parametrize("provider,key,status_code", [
+    ("billingo", None, 409), ("szamlazz_hu", None, 404),
+])
+def test_connection_never_uses_a_missing_or_other_providers_saved_key(provider, key, status_code):
+    client = InvoiceSettingsClient(provider=provider, encrypted_key=key)
+    with (
+        patch.object(settings, "ENCRYPTION_MASTER_KEY", Fernet.generate_key().decode()),
+        patch.object(SupabaseDataService, "get_authenticated_client", AsyncMock(return_value=client)),
+        patch.object(SupabaseDataService, "_close_authenticated_client", AsyncMock()),
+        patch.object(SzamlazzHuProvider, "test_connection", AsyncMock()) as ping,
+        pytest.raises(HTTPException) as error,
+    ):
+        asyncio.run(CompanyCredentialService.test_invoice_connection(
+            TOKEN, COMPANY_ID, "szamlazz_hu", None
+        ))
+    assert error.value.status_code == status_code
+    ping.assert_not_awaited()
+
+
+@pytest.mark.parametrize("error,expected", [
+    (SzamlazzHuRejectedError("secret", code="3"), "invalid_key"),
+    (SzamlazzHuRejectedError("secret", code="136"), "provider_error"),
+    (SzamlazzHuRequestError("secret"), "unavailable"),
+    (SzamlazzHuResponseError("secret"), "unconfirmed"),
+])
+def test_connection_returns_safe_distinct_failure_statuses(error, expected):
+    with patch.object(SzamlazzHuProvider, "test_connection", AsyncMock(side_effect=error)):
+        result = asyncio.run(CompanyCredentialService._test_szamlazz_connection("secret"))
+    assert result.success is False and result.status == expected
+    assert "secret" not in result.model_dump_json()
+
+
+def test_connection_endpoint_authentication_validation_and_json_contract():
+    import httpx
+    from fastapi import FastAPI
+    from app.api.v1.endpoints.company import router
+    from app.schemas.company import InvoiceConnectionTestResponse
+
+    app = FastAPI()
+    app.include_router(router, prefix="/company")
+    ping = AsyncMock(return_value=InvoiceConnectionTestResponse(success=True, status="connected"))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+            url = "/company/invoice-settings/test-connection"
+            payload = {"company_id": COMPANY_ID, "api_key": "secret"}
+            assert (await client.post(url, json=payload)).status_code == 401
+            headers = {"Authorization": f"Bearer {TOKEN}"}
+            assert (await client.post(url, headers=headers, json={**payload, "api_key": "  "})).status_code == 422
+            response = await client.post(url, headers=headers, json=payload)
+            assert response.status_code == 200
+            assert response.json() == {"success": True, "status": "connected", "provider_error_code": None}
+
+    with patch.object(CompanyCredentialService, "test_invoice_connection", ping):
+        asyncio.run(run())
+    ping.assert_awaited_once()
+    assert str(ping.call_args.kwargs["company_id"]) == COMPANY_ID
+    assert ping.call_args.kwargs["api_key"] == "secret"

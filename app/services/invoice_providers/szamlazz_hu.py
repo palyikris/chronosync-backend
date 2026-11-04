@@ -3,6 +3,7 @@ import binascii
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 from urllib.parse import unquote_plus
+from uuid import uuid4
 from xml.etree.ElementTree import (
     Element,
     ParseError,
@@ -92,6 +93,35 @@ class SzamlazzHuProvider(InvoiceProvider):
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await self._send(client, xml, form_field=self.PDF_FORM_FIELD)
         return self.parse_response(response, preview=False).model_dump()
+
+    async def test_connection(self) -> None:
+        """Authenticate using a read-only lookup, even for an empty account.
+
+        The PDF query contract documents code 7 for an unknown external ID:
+        https://docs.szamlazz.hu/agent/querying_pdf/response
+        Only this specific rejection (or a complete lookup success) proves
+        access; HTTP 200 alone does not establish valid credentials.
+        """
+        async def check(provider: "SzamlazzHuProvider") -> None:
+            try:
+                result = await provider.get_invoice_pdf(
+                    external_id=f"chronosync-connection-test-{uuid4()}"
+                )
+            except SzamlazzHuRejectedError as exc:
+                if exc.code == "7":
+                    return
+                raise
+            if not result.get("invoice_number") or not result.get("pdf"):
+                raise SzamlazzHuResponseError(
+                    "The Számlázz.hu connection could not be confirmed."
+                )
+
+        if self._http_client is not None:
+            await check(self)
+        else:
+            timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                await check(SzamlazzHuProvider(self.api_key, http_client=client))
 
     async def _send(self, client: httpx.AsyncClient, xml: bytes, *, form_field: str | None = None) -> httpx.Response:
         try:

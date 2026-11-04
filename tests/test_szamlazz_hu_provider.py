@@ -15,7 +15,101 @@ from app.services.company_service import CompanyCredentialService
 from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuProvider,
     SzamlazzHuRejectedError,
+    SzamlazzHuRequestError,
+    SzamlazzHuResponseError,
 )
+
+
+def test_connection_authenticates_with_a_single_read_only_query_for_a_random_id():
+    ids = []
+
+    def handler(request):
+        assert request.method == "POST"
+        assert str(request.url) == SzamlazzHuProvider.API_URL
+        assert b'name="action-szamla_agent_pdf"' in request.content
+        assert b'action-xmlagentxmlfile' not in request.content
+        xml = request.content.split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0]
+        root = ElementTree.fromstring(xml)
+        ns = "{http://www.szamlazz.hu/xmlszamlapdf}"
+        assert root.tag == ns + "xmlszamlapdf"
+        assert [node.tag for node in root] == [ns + name for name in (
+            "szamlaagentkulcs", "valaszVerzio", "szamlaKulsoAzon"
+        )]
+        assert root.find(ns + "szamlaagentkulcs").text == "test-key"
+        assert root.find(ns + "valaszVerzio").text == "2"
+        ids.append(root.find(ns + "szamlaKulsoAzon").text)
+        response = b'''<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz">
+            <sikeres>false</sikeres><hibakod>7</hibakod>
+            <hibauzenet>Unknown external ID</hibauzenet></xmlszamlavalasz>'''
+        return httpx.Response(200, content=gzip.compress(response),
+                              headers={"Content-Encoding": "gzip"})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = SzamlazzHuProvider(" TEST-Key ", http_client=client)
+            await provider.test_connection()
+            await provider.test_connection()
+
+    asyncio.run(run())
+    assert len(ids) == 2 and ids[0] != ids[1]
+    assert all(value.startswith("chronosync-connection-test-") for value in ids)
+
+
+@pytest.mark.parametrize("code", ["3", "136", "57", "1"])
+def test_connection_does_not_treat_other_provider_rejections_as_valid_credentials(code):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, content=f'''
+            <xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz">
+            <sikeres>false</sikeres><hibakod>{code}</hibakod>
+            <hibauzenet>Rejected</hibauzenet></xmlszamlavalasz>'''.encode())
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await SzamlazzHuProvider("test-key", http_client=client).test_connection()
+
+    with pytest.raises(SzamlazzHuRejectedError) as error:
+        asyncio.run(run())
+    assert error.value.code == code and len(calls) == 1
+
+
+@pytest.mark.parametrize("body,headers", [
+    (b"<html>Login</html>", {}),
+    (b'''<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz">
+        <sikeres>true</sikeres></xmlszamlavalasz>''', {}),
+    (b'''<xmlszamlavalasz xmlns="http://www.szamlazz.hu/xmlszamlavalasz">
+        <sikeres>false</sikeres><hibakod>7</hibakod></xmlszamlavalasz>''',
+     {"szlahu_error_code": "3", "szlahu_error": "Rejected"}),
+])
+def test_connection_does_not_confirm_malformed_incomplete_or_conflicting_responses(body, headers):
+    async def run():
+        transport = httpx.MockTransport(lambda _: httpx.Response(200, content=body, headers=headers))
+        async with httpx.AsyncClient(transport=transport) as client:
+            await SzamlazzHuProvider("test-key", http_client=client).test_connection()
+
+    with pytest.raises(SzamlazzHuResponseError):
+        asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "http_error"])
+def test_connection_reports_transport_failures_without_retrying(failure):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("Provider timed out", request=request)
+        return httpx.Response(503)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await SzamlazzHuProvider("test-key", http_client=client).test_connection()
+
+    with pytest.raises(SzamlazzHuRequestError):
+        asyncio.run(run())
+    assert len(calls) == 1
 
 
 def test_existing_pdf_query_uses_external_id_and_safe_read_operation_with_gzip():

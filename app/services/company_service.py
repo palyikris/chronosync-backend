@@ -7,6 +7,13 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException, status
 
 from app.core.config import settings
+from app.schemas.company import InvoiceConnectionTestResponse
+from app.services.invoice_providers.szamlazz_hu import (
+    SzamlazzHuProvider,
+    SzamlazzHuRejectedError,
+    SzamlazzHuRequestError,
+    SzamlazzHuResponseError,
+)
 from app.services.supabase_service import SupabaseDataService
 
 logger = logging.getLogger(__name__)
@@ -187,6 +194,52 @@ class CompanyCredentialService:
         finally:
             if supabase is not None:
                 await SupabaseDataService._close_authenticated_client(supabase)
+
+    @classmethod
+    async def test_invoice_connection(
+        cls,
+        user_jwt: str,
+        company_id: UUID,
+        invoice_provider: str,
+        api_key: str | None,
+    ) -> InvoiceConnectionTestResponse:
+        if invoice_provider != "szamlazz_hu":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Connection testing is available for Számlázz.hu only.",
+            )
+
+        if api_key is not None:
+            # Testing an unsaved key still requires company admin access.
+            await cls.get_invoice_settings(user_jwt, company_id)
+            normalized_key = api_key.strip()
+            if not normalized_key:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="The invoice provider API key must not be blank.",
+                )
+            return await cls._test_szamlazz_connection(normalized_key)
+
+        async with cls.decrypted_szamlazz_agent_key(user_jwt, company_id) as key:
+            return await cls._test_szamlazz_connection(key)
+
+    @staticmethod
+    async def _test_szamlazz_connection(api_key: str) -> InvoiceConnectionTestResponse:
+        try:
+            await SzamlazzHuProvider(api_key).test_connection()
+        except SzamlazzHuRejectedError as exc:
+            # Never return raw provider messages: they may contain credentials
+            # or internal account details. The UI translates these statuses.
+            return InvoiceConnectionTestResponse(
+                success=False,
+                status="invalid_key" if exc.code == "3" else "provider_error",
+                provider_error_code=exc.code if exc.code and exc.code.isdigit() else None,
+            )
+        except SzamlazzHuRequestError:
+            return InvoiceConnectionTestResponse(success=False, status="unavailable")
+        except SzamlazzHuResponseError:
+            return InvoiceConnectionTestResponse(success=False, status="unconfirmed")
+        return InvoiceConnectionTestResponse(success=True, status="connected")
 
     @classmethod
     @asynccontextmanager

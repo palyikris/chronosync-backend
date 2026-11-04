@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, status
 
 from app.api.v1.endpoints.reports import extract_bearer_token
 from app.schemas.company import (
+    InvoiceConnectionTestResponse,
     InvoiceProviderConfigRequest,
     InvoiceProviderConfigResponse,
     SzamlazzKeyRequest,
@@ -41,6 +42,19 @@ async def set_invoice_settings(
         api_key=payload.api_key.get_secret_value() if payload.api_key else None,
     )
     return InvoiceProviderConfigResponse(**saved_settings)
+
+
+@router.post("/invoice-settings/test-connection")
+async def test_invoice_connection(
+    payload: InvoiceProviderConfigRequest,
+    token: str = Depends(extract_bearer_token),
+) -> InvoiceConnectionTestResponse:
+    return await CompanyCredentialService.test_invoice_connection(
+        user_jwt=token,
+        company_id=payload.company_id,
+        invoice_provider=payload.invoice_provider,
+        api_key=payload.api_key.get_secret_value() if payload.api_key else None,
+    )
 
 
 @router.post("/szamlazz-key", status_code=status.HTTP_204_NO_CONTENT)
