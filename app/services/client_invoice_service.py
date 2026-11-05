@@ -17,11 +17,15 @@ from app.schemas.invoices import (
     ClientInvoiceReview,
     InvoiceCreateRequest,
     InvoiceHistoryItem,
+    InvoiceAttachmentInfo,
+    InvoiceReversalDetails,
     InvoiceReviewEntry,
     InvoiceReviewRecipient,
     InvoiceReviewProjectLine,
 )
 from app.services.company_service import CompanyCredentialService
+from app.services.invoice_annex_service import InvoiceAnnexService
+from app.services.invoice_providers.base import InvoiceEmailAttachment
 from app.services.invoice_providers.amounts import calculate_line_totals
 from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuError,
@@ -45,7 +49,12 @@ class ClientInvoiceService:
         "external_id, recipient_name, recipient_email, send_email, quantity, unit, "
         "net_unit_price, vat_code, currency, net_total, vat_total, gross_total, "
         "invoice_number, provider_error_code, provider_error_message, attempt_count, "
-        "issued_at, created_at, updated_at, pdf_available, clients(name)"
+        "issued_at, created_at, updated_at, pdf_available, clients(name), "
+        "reversal_id, reversal_status, reversal_reason, reversal_issue_date, "
+        "reversal_e_invoice, reversal_invoice_number, reversal_net_total, "
+        "reversal_gross_total, reversal_pdf_available, reversal_error_code, "
+        "reversal_error_message, reversal_attempt_count, reversed_at, "
+        "attachment_metadata, attachment_available"
     )
 
     @classmethod
@@ -156,7 +165,7 @@ class ClientInvoiceService:
                 "payment_method": invoice.payment_method,
                 "language": invoice.language,
                 "billing_model": "project",
-                "item_name": " / ".join(line.project_name for line in lines),
+                "item_name": " / ".join(line.invoice_name or line.project_name for line in lines),
                 "quantity": Decimal("1"),
                 "unit": "számla",
                 "net_unit_price": net_total,
@@ -165,6 +174,12 @@ class ClientInvoiceService:
                 "exchange_rate_bank": (
                     invoice.exchange_rate_bank if invoice.currency != "HUF" else None
                 ),
+                "e_invoice": invoice.e_invoice,
+                "invoice_prefix": invoice.invoice_prefix,
+                "seller_bank_name": invoice.seller_bank_name,
+                "seller_bank_account": invoice.seller_bank_account,
+                "invoice_comment": invoice.comment,
+                "attach_timesheet_report": profile.get("attach_timesheet_report") is True,
                 "billing_profile_updated_at": profile.get("updated_at"),
                 "net_total": net_total,
                 "vat_total": vat_total,
@@ -172,8 +187,16 @@ class ClientInvoiceService:
                 "recipient": recipient,
                 "approved_entries": entries,
                 "items": lines,
-                "project_quantities": {str(key): str(value) for key, value in (project_quantities or {}).items()},
+                "project_quantities": {
+                    str(line.project_id): str(line.quantity) for line in lines
+                    if line.logged_hours is None
+                },
             }
+            if review_data["attach_timesheet_report"]:
+                draft = ClientInvoiceReview(**review_data, review_fingerprint="")
+                language = str(client.get("invoice_attachment_language") or "hu")
+                attachment = await InvoiceAnnexService.build(draft, language=language)
+                review_data["attachment"] = InvoiceAnnexService.metadata(attachment, language=language)
             review = ClientInvoiceReview(
                 **review_data,
                 review_fingerprint=cls._review_fingerprint(review_data),
@@ -216,23 +239,30 @@ class ClientInvoiceService:
             company_id=company_id,
         )
 
+        attachment = await cls._build_reviewed_attachment(review)
         invoice_id = await cls._reserve_invoice(user_jwt=user_jwt, review=review)
         live_invoice = invoice.model_copy(
             update={
                 "preview": False,
                 "download_pdf": True,
                 "external_id": f"chronosync-{invoice_id}",
+                "order_number": f"chronosync-{invoice_id}",
             }
         )
         provider_started = False
         try:
+            if attachment:
+                await cls._store_invoice_attachment(user_jwt=user_jwt,
+                    invoice_id=invoice_id, attachment=attachment)
             async with CompanyCredentialService.decrypted_szamlazz_agent_key(
                 user_jwt, company_id
             ) as api_key:
                 provider_started = True
-                provider_result = await SzamlazzHuProvider(api_key).create_invoice(
-                    live_invoice.model_dump()
-                )
+                provider = SzamlazzHuProvider(api_key)
+                if attachment and review.recipient.send_email:
+                    provider_result = await provider.create_invoice(live_invoice.model_dump(), attachments=[attachment])
+                else:
+                    provider_result = await provider.create_invoice(live_invoice.model_dump())
         except HTTPException as exc:
             await cls._mark_attempt(
                 user_jwt=user_jwt,
@@ -240,11 +270,11 @@ class ClientInvoiceService:
                 attempt_status="uncertain" if provider_started else "failed",
                 error_code=(
                     "provider_response_uncertain" if provider_started
-                    else "provider_configuration_error"
+                    else "invoice_preparation_failed"
                 ),
                 error_message=(
                     "The provider outcome is uncertain. Reconcile before retrying."
-                    if provider_started else "The invoice provider configuration is not usable."
+                    if provider_started else "Invoice preparation failed. No invoice request was sent to Számlázz.hu."
                 ),
             )
             if provider_started:
@@ -454,6 +484,78 @@ class ClientInvoiceService:
             await SupabaseDataService._close_authenticated_client(supabase)
 
     @classmethod
+    async def _build_reviewed_attachment(cls, review: ClientInvoiceReview) -> InvoiceEmailAttachment | None:
+        if not review.attach_timesheet_report:
+            if review.attachment:
+                raise HTTPException(409, "Unexpected billing report in the invoice review.")
+            return None
+        if not review.attachment:
+            raise HTTPException(409, "A required billing report is missing. Review the invoice again.")
+        attachment = await InvoiceAnnexService.build(review, language=review.attachment.language)
+        if InvoiceAnnexService.metadata(attachment, language=review.attachment.language) != review.attachment:
+            raise HTTPException(409, "The billing report changed after review. Review the invoice again.")
+        return attachment
+
+    @classmethod
+    async def _store_invoice_attachment(cls, *, user_jwt: str, invoice_id: UUID,
+                                        attachment: InvoiceEmailAttachment) -> None:
+        client = await SupabaseDataService.get_authenticated_client(user_jwt)
+        try:
+            try:
+                response = await client.rpc("store_invoice_attachment", {
+                    "p_invoice_id": str(invoice_id),
+                    "p_content_base64": base64.b64encode(attachment.content).decode("ascii"),
+                }).execute()
+                rows = response.data
+                if not (isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict)
+                        and str(rows[0].get("invoice_id")) == str(invoice_id)
+                        and rows[0].get("sha256") == hashlib.sha256(attachment.content).hexdigest()):
+                    raise HTTPException(502, "The billing report could not be saved. No invoice was sent to the provider.")
+            except APIError as exc:
+                raise HTTPException(403 if exc.code == "42501" else 409 if exc.code == "PT409" else 502,
+                    "The billing report could not be saved. No invoice was sent to the provider.") from None
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(502, "The billing report could not be saved. No invoice was sent to the provider.") from None
+        finally:
+            await SupabaseDataService._close_authenticated_client(client)
+
+    @classmethod
+    async def preview_invoice_attachment(cls, *, user_jwt: str, company_id: UUID,
+        client_id: UUID, period_start: date, period_end: date, review_fingerprint: str,
+        project_quantities: dict[UUID, Decimal] | None = None) -> InvoiceEmailAttachment:
+        review = await cls.build_invoice_review(user_jwt=user_jwt, company_id=company_id,
+            client_id=client_id, period_start=period_start, period_end=period_end,
+            project_quantities=project_quantities)
+        if review.review_fingerprint != review_fingerprint:
+            raise HTTPException(409, "The invoice changed after review. Refresh before downloading its report.")
+        attachment = await cls._build_reviewed_attachment(review)
+        if not attachment:
+            raise HTTPException(404, "This invoice review does not include a billing report.")
+        return attachment
+
+    @classmethod
+    async def get_invoice_attachment(cls, *, user_jwt: str, company_id: UUID,
+                                      invoice_id: UUID) -> InvoiceEmailAttachment:
+        current = await cls.get_invoice_history_item(user_jwt=user_jwt,
+            company_id=company_id, invoice_id=invoice_id)
+        if not current.attachment_available or not current.attachment:
+            raise HTTPException(404, "The stored invoice report was not found.")
+        client = await SupabaseDataService.get_authenticated_client(user_jwt)
+        try:
+            response = await client.table("invoice_ledger").select("attachment_bytes").eq(
+                "id", str(invoice_id)).eq("company_id", str(company_id)).limit(1).execute()
+            rows = response.data or []
+            content = cls._decode_bytea(rows[0].get("attachment_bytes")) if isinstance(rows, list) and rows else None
+            if (not content or len(content) != current.attachment.size_bytes
+                    or hashlib.sha256(content).hexdigest() != current.attachment.sha256):
+                raise HTTPException(502, "The stored invoice report failed its integrity check.")
+            return InvoiceEmailAttachment(filename=current.attachment.filename, content=content)
+        finally:
+            await SupabaseDataService._close_authenticated_client(client)
+
+    @classmethod
     async def get_invoice_history_item(
         cls,
         *,
@@ -503,7 +605,7 @@ class ClientInvoiceService:
                 .select("invoice_number, pdf_bytes")
                 .eq("id", str(invoice_id))
                 .eq("company_id", str(company_id))
-                .eq("status", "issued")
+                .in_("status", ["issued", "reversed"])
                 .limit(1)
                 .execute()
             )
@@ -592,7 +694,7 @@ class ClientInvoiceService:
     async def _query_confirmed_pdf(
         cls, *, user_jwt: str, current: InvoiceHistoryItem, invoice_number: str | None,
     ) -> bytes:
-        if current.provider != "szamlazz_hu" or current.status not in {"uncertain", "issued"}:
+        if current.provider != "szamlazz_hu" or current.status not in {"uncertain", "issued", "reversed"}:
             raise HTTPException(409, "This invoice cannot be recovered from Számlázz.hu.")
         if current.external_id != f"chronosync-{current.id}":
             raise HTTPException(409, "The invoice external ID does not match its ledger record.")
@@ -623,7 +725,7 @@ class ClientInvoiceService:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         client_response = await (
             supabase.table("clients")
-            .select("id, company_id, client_code, name, is_active")
+            .select("id, company_id, client_code, name, is_active, invoice_attachment_language")
             .eq("id", str(client_id))
             .eq("company_id", str(company_id))
             .limit(1)
@@ -650,7 +752,8 @@ class ClientInvoiceService:
                 "billing_postal_code, billing_city, billing_address, tax_subject, "
                 "tax_number, eu_vat_number, group_tax_number, billing_email, "
                 "send_invoice_email, invoice_language, payment_method, "
-                "payment_term_days, vat_code, updated_at"
+                "payment_term_days, vat_code, updated_at, invoice_electronic, "
+                "fulfillment_date_policy, invoice_prefix, seller_bank_name, seller_bank_account, attach_timesheet_report"
             )
             .eq("client_id", str(client_id))
             .eq("company_id", str(company_id))
@@ -729,14 +832,25 @@ class ClientInvoiceService:
             raise HTTPException(409, "No billable project lines were selected.")
         issue_date = datetime.now(cls.BUDAPEST_TIMEZONE).date()
         due_date = issue_date + timedelta(days=int(profile["payment_term_days"]))
+        policy = profile.get("fulfillment_date_policy", "period_end")
+        fulfillment_dates = {"period_end": period_end, "due_date": due_date, "issue_date": issue_date}
+        if policy not in fulfillment_dates:
+            raise HTTPException(409, "Select a valid fulfillment date policy in the billing profile.")
+        period_label = "Elszámolási időszak" if profile["invoice_language"] == "hu" else "Service period"
+        comment = f"{period_label}: {period_start.isoformat()} - {period_end.isoformat()}"
         order_number = f"cs-{company_id.hex}-{client_id.hex}-{period_start:%Y%m%d}-{period_end:%Y%m%d}"
         try:
             invoice = InvoiceCreateRequest.model_validate({
-                "issue_date": issue_date, "fulfillment_date": period_end,
+                "issue_date": issue_date, "fulfillment_date": fulfillment_dates[policy],
                 "due_date": due_date, "payment_method": profile["payment_method"],
                 "currency": lines[0].currency, "language": profile["invoice_language"],
                 "order_number": order_number, "external_id": order_number,
                 "preview": preview, "download_pdf": True,
+                "e_invoice": profile.get("invoice_electronic", False),
+                "invoice_prefix": profile.get("invoice_prefix"),
+                "seller_bank_name": profile.get("seller_bank_name"),
+                "seller_bank_account": profile.get("seller_bank_account"),
+                "comment": comment,
                 "customer": {
                     "name": profile["billing_name"], "country": profile["billing_country_code"],
                     "postal_code": profile["billing_postal_code"], "city": profile["billing_city"],
@@ -745,9 +859,12 @@ class ClientInvoiceService:
                     "tax_subject": profile["tax_subject"], "tax_number": profile.get("tax_number"),
                     "eu_tax_number": profile.get("eu_vat_number"), "group_tax_number": profile.get("group_tax_number"),
                 },
-                "items": [{"name": line.project_name, "quantity": line.quantity,
+                "items": [{"name": line.invoice_name or line.project_name, "quantity": line.quantity,
                     "unit": line.unit, "net_unit_price": line.net_unit_price,
-                    "vat_rate": line.vat_code} for line in lines],
+                    "vat_rate": line.vat_code,
+                    "comment": "\n".join(filter(None, [line.invoice_note,
+                        f"PO: {line.po_number}" if line.po_number else None])) or None,
+                    } for line in lines],
             })
         except ValidationError as exc:
             raise HTTPException(409, "The billing profile or project prices cannot produce a valid invoice. Review the saved settings.") from exc
@@ -1114,6 +1231,19 @@ class ClientInvoiceService:
             gross_total=row.get("gross_total"),
             invoice_number=row.get("invoice_number"),
             pdf_available=row.get("pdf_available") is True,
+            attachment=InvoiceAttachmentInfo.model_validate(row["attachment_metadata"])
+                if row.get("attachment_metadata") else None,
+            attachment_available=row.get("attachment_available") is True,
+            reversal=InvoiceReversalDetails(
+                id=row["reversal_id"], status=row["reversal_status"],
+                reason=row["reversal_reason"], issue_date=row["reversal_issue_date"],
+                e_invoice=row["reversal_e_invoice"],
+                invoice_number=row.get("reversal_invoice_number"),
+                net_total=row.get("reversal_net_total"), gross_total=row.get("reversal_gross_total"),
+                pdf_available=row.get("reversal_pdf_available") is True,
+                error_code=row.get("reversal_error_code"), error_message=row.get("reversal_error_message"),
+                attempt_count=row["reversal_attempt_count"], reversed_at=row.get("reversed_at"),
+            ) if row.get("reversal_id") else None,
             provider_error_code=row.get("provider_error_code"),
             provider_error_message=row.get("provider_error_message"),
             attempt_count=int(row.get("attempt_count") or 1),

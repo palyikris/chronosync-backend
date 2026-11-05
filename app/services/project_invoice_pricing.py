@@ -14,6 +14,7 @@ from app.services.invoice_providers.amounts import calculate_line_totals
 
 HOURLY_UNITS = {"óra", "hour", "hours", "h", "hr"}
 MONTHLY_UNITS = {"hó", "hónap", "month"}
+PERSON_MONTH_UNITS = {"/fő/hó", "fő/hó", "person/month", "person/months"}
 
 
 async def _pages(factory: Callable[[], Any]) -> list[dict[str, Any]]:
@@ -53,13 +54,19 @@ async def build_project_lines(
             raise HTTPException(409, "An approved entry has no valid project for this client.")
         hours[str(entry.project_id)] += entry.hours_logged
         billable_hours[str(entry.project_id)] += entry.hours_logged * entry.billing_multiplier
-    selected = set(hours) | {key for key, value in quantities.items() if value > 0}
-    if not selected:
-        raise HTTPException(404, "No approved time or project quantities were found for this period.")
     prices = await _pages(lambda: supabase.table("project_pricing")
-        .select("project_id,company_id,pricing_year,indexed_fee,unit,currency,updated_at")
+        .select("project_id,company_id,pricing_year,indexed_fee,unit,currency,updated_at,recurring_quantity,invoice_name,attachment_note,po_number")
         .eq("company_id", str(company_id)).eq("pricing_year", period_start.year).order("project_id"))
     prices_by_id = {str(p["project_id"]): p for p in prices}
+    recurring = {
+        project_id for project_id, price in prices_by_id.items()
+        if project_id in projects_by_id and projects_by_id[project_id].get("is_active") is True
+        and (str(price["unit"]).strip().casefold() in MONTHLY_UNITS | PERSON_MONTH_UNITS
+             or price.get("recurring_quantity") is not None)
+    }
+    selected = set(hours) | {key for key, value in quantities.items() if value > 0} | recurring
+    if not selected:
+        raise HTTPException(404, "No approved time or project quantities were found for this period.")
     lines = []
     for project_id in sorted(selected):
         project = projects_by_id[project_id]
@@ -75,19 +82,22 @@ async def build_project_lines(
                 raise HTTPException(409, f"Hourly quantity for '{name}' comes from approved time and cannot be overridden.")
             quantity = billable_hours[project_id]
         else:
-            quantity = quantities.get(project_id, Decimal(0))
+            quantity = quantities.get(project_id, Decimal(str(price.get("recurring_quantity") or 0)))
             if quantity <= 0:
                 raise HTTPException(409, f"Enter the invoice quantity ({unit}) for project '{name}'.")
-            if unit.strip().casefold() in MONTHLY_UNITS and (
-                period_start.day != 1 or period_end != period_start.replace(
-                    day=calendar.monthrange(period_start.year, period_start.month)[1]) or quantity != 1
-            ):
-                raise HTTPException(409, f"Monthly project '{name}' requires one complete calendar month and quantity 1.")
+            if project_id in recurring:
+                if (period_start.day != 1 or period_end != period_start.replace(
+                        day=calendar.monthrange(period_start.year, period_start.month)[1])):
+                    raise HTTPException(409, f"Monthly project '{name}' requires one complete calendar month.")
+                if unit.strip().casefold() in MONTHLY_UNITS and quantity != 1:
+                    raise HTTPException(409, f"Monthly project '{name}' requires quantity 1.")
         try:
             item = InvoiceLineItem(name=name, quantity=quantity, unit=unit,
                 net_unit_price=price["indexed_fee"], vat_rate=vat_code)
             net, vat, gross = calculate_line_totals(item, currency=price["currency"], tax_subject=tax_subject)
             lines.append(InvoiceReviewProjectLine(project_id=project_id, project_name=name,
+                invoice_name=price.get("invoice_name"), invoice_note=price.get("attachment_note"),
+                po_number=price.get("po_number"),
                 is_payroll=project.get("is_payroll", False),
                 logged_hours=hours[project_id] if unit.strip().casefold() in HOURLY_UNITS else None,
                 pricing_year=price["pricing_year"], pricing_updated_at=price["updated_at"],

@@ -108,7 +108,7 @@ def test_zero_price_is_valid_and_non_hourly_quantities_are_explicit():
     db = Database()
     db.tables['project_pricing'][0]['indexed_fee'] = '0'
     assert lines(db)[0].net_total == 0
-    with pytest.raises(HTTPException, match='') as raised: lines(db, quantities={})
+    with pytest.raises(HTTPException) as raised: lines(db, quantities={})
     assert 'Enter the invoice quantity' in raised.value.detail
     with pytest.raises(HTTPException) as raised: lines(db, quantities={HOURLY: Decimal(99), MONTHLY: Decimal(1)})
     assert 'cannot be overridden' in raised.value.detail
@@ -126,6 +126,63 @@ def test_fixed_quantity_can_invoice_without_timesheets_and_mixed_currency_is_rej
     db.tables['project_pricing'][1]['currency'] = 'HUF'
     with pytest.raises(HTTPException) as raised: lines(db)
     assert 'one currency' in raised.value.detail
+
+
+def test_monthly_project_without_time_cannot_be_silently_omitted():
+    db = Database()
+    db.tables['timesheets'] = db.tables['timesheets'][:1]
+    with pytest.raises(HTTPException) as raised:
+        lines(db, quantities={})
+    assert "Enter the invoice quantity" in raised.value.detail
+    assert "Monthly work" in raised.value.detail
+
+
+@pytest.mark.parametrize('unit,quantity', [('hó', '1'), ('/fő/hó', '26'), ('fő', '18')])
+def test_saved_monthly_quantity_includes_a_service_without_time(unit, quantity):
+    db = Database()
+    db.tables['timesheets'] = db.tables['timesheets'][:1]
+    db.tables['project_pricing'][1].update(unit=unit, recurring_quantity=quantity)
+    result = lines(db, quantities={})
+    assert result[1].quantity == Decimal(quantity)
+    assert result[1].net_total == Decimal(quantity) * 500
+    with pytest.raises(HTTPException) as raised:
+        lines(db, quantities={}, start=date(2026, 10, 2))
+    assert 'complete calendar month' in raised.value.detail
+
+
+def test_person_month_service_requires_headcount_even_when_no_time_exists():
+    db = Database()
+    db.tables['timesheets'] = db.tables['timesheets'][:1]
+    db.tables['project_pricing'][1]['unit'] = '/fő/hó'
+    with pytest.raises(HTTPException) as raised:
+        lines(db, quantities={})
+    assert 'Enter the invoice quantity' in raised.value.detail
+
+
+def test_review_resolves_recurring_quantities_and_keeps_customer_facing_names():
+    db = Database()
+    db.tables['timesheets'] = db.tables['timesheets'][:1]
+    db.tables['project_pricing'][1].update(recurring_quantity='1', invoice_name='Accounting service',
+        attachment_note='According to the annex', po_number='PO-123')
+    db.tables['client_billing_profiles'][0].update(invoice_electronic=True, fulfillment_date_policy='due_date',
+        invoice_prefix='E-ECS', seller_bank_name='Test bank', seller_bank_account='TEST-IBAN')
+    with (
+        patch.object(SupabaseDataService, 'get_authenticated_client', AsyncMock(return_value=db)),
+        patch.object(SupabaseDataService, '_close_authenticated_client', AsyncMock()),
+        patch.object(SupabaseDataService, '_assert_invoice_attachment_access_with_client', AsyncMock()),
+    ):
+        review, invoice = asyncio.run(ClientInvoiceService._build_review_context(
+            user_jwt='fake', company_id=COMPANY, client_id=CLIENT,
+            period_start=date(2026,10,1), period_end=date(2026,10,31)))
+    assert review.project_quantities == {MONTHLY: Decimal(1)}
+    assert review.e_invoice is True and invoice.e_invoice is True
+    assert invoice.fulfillment_date == invoice.due_date == review.fulfillment_date
+    assert invoice.invoice_prefix == review.invoice_prefix == 'E-ECS'
+    assert invoice.seller_bank_account == review.seller_bank_account == 'TEST-IBAN'
+    assert invoice.items[1].name == 'Accounting service'
+    assert invoice.items[1].comment == 'According to the annex\nPO: PO-123'
+    assert '2026-10-01 - 2026-10-31' in invoice.comment
+    assert review.invoice_comment == invoice.comment
 
 
 def test_unknown_project_and_cross_year_period_are_rejected():

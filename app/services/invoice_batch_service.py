@@ -76,7 +76,7 @@ class InvoiceBatchService:
                 except HTTPException as exc:
                     # Only known business ineligibility can be acknowledged as a skip.
                     # Outages and authorization failures must stop the preflight.
-                    if exc.status_code not in {404, 409}:
+                    if exc.status_code not in {404, 409, 413}:
                         raise
                     results.append(
                         InvoiceBatchReviewItem(
