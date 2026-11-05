@@ -123,7 +123,7 @@ def test_saved_quantity_review_survives_browser_number_roundtrip():
          patch.object(SupabaseDataService,'_close_authenticated_client',AsyncMock()), \
          patch.object(SupabaseDataService,'_assert_invoice_attachment_access_with_client',AsyncMock()):
         first=asyncio.run(Invoices.build_invoice_review(**params,project_quantities={}))
-        quantities={UUID(key):Decimal(str(float(value))) for key,value in first.project_quantities.items()}
+        quantities={UUID(str(key)):Decimal(str(float(value))) for key,value in first.project_quantities.items()}
         repeated=asyncio.run(Invoices.build_invoice_review(**params,project_quantities=quantities))
         assert repeated.review_fingerprint==first.review_fingerprint
         assert repeated.attachment==first.attachment
