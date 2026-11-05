@@ -1,10 +1,10 @@
 # Invoice workflow alignment: first implementation
 
 Prepared 4 November 2026 after comparing Ecovis's downloaded invoices with the
-Test Inc examples. These changes are local source changes. The new migration has
-been verified on a disposable local PostgreSQL database and has not been applied
-to the hosted project. Existing Ecovis recipients, prices and preview mode are
-unchanged.
+Test Inc examples. The migrations were applied and compatible staging applications
+verified on 5 November; production applications have not been promoted. See the
+[staging verification report](invoice-lifecycle-staging-2026-11-05.md).
+Existing Ecovis recipients, prices and preview mode are unchanged.
 
 ## Recurring charges
 
@@ -68,7 +68,7 @@ existing history spans two repositories.
 Configure representative staging clients with their reviewed monthly quantities,
 electronic invoice preferences, dates and bank details before enabling live use.
 
-## Verification
+## Initial verification (4 November)
 
 - Complete backend suite: 252 passed; database suites skip unless their explicit
   disposable DSNs are supplied.
@@ -91,9 +91,9 @@ electronic invoice preferences, dates and bank details before enabling live use.
 
 Fee currency versus invoice currency conversion (including reviewed rate/date)
 awaits the company's clarification. Storno and reservation release for reviewed
-replacement are implemented locally; see [invoice-storno.md](invoice-storno.md).
-Per-invoice annex generation, archive storage and email upload are also implemented
-locally; see [invoice-annex-delivery.md](invoice-annex-delivery.md) for verification
+replacement passed the deployed staging flow; see [invoice-storno.md](invoice-storno.md).
+Per-invoice annex generation, archive storage and email upload are implemented
+and exercised in staging; see [invoice-annex-delivery.md](invoice-annex-delivery.md) for verification
 and delivery limits. Live recipient metadata, contract rates and unit-price
 rounding still need approved reconciliation; the implementation does not infer
 or overwrite those business decisions from the sample PDFs.

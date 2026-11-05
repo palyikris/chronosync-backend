@@ -1,7 +1,9 @@
 # Invoice annex generation and delivery
 
-Implemented locally on 4 November 2026. These changes have not been deployed and
-no customer email or live invoice was sent during implementation.
+Implemented on 4 November 2026 and verified through the deployed staging invoice
+and storno flow on 5 November. Email receipt remains pending. See the
+[staging verification report](invoice-lifecycle-staging-2026-11-05.md) for the
+current release state and actual provider evidence.
 
 ## Behavior
 
@@ -60,8 +62,8 @@ failed issuance can replace its report only during a fresh reserved attempt.
 
 ## Release
 
-Apply `supabase/migrations/20261104204746_invoice_annex_delivery.sql` after the
-pending recurring-configuration and storno migrations. Deploy the compatible
+For a new installation, apply `supabase/migrations/20261104204746_invoice_annex_delivery.sql`
+after the recurring-configuration and storno migrations. Deploy the compatible
 backend and frontend together while production remains in preview mode. The
 migration adds private report storage and a generated availability flag to the
 existing RLS-protected ledger, a reservation/finalization trigger and an explicit
@@ -91,14 +93,15 @@ report, rejecting an invalid download, and archived report downloads after storn
 in English and mobile Hungarian. Representative two-sheet reports were exported
 with LibreOffice and their printed layout inspected in both languages.
 
-The final combined backend/database run passed 397 tests, with 96 tests requiring
+The final combined backend/database run passed 398 tests, with 96 tests requiring
 other integration environments skipped. The frontend production build,
-affected-file ESLint, 77 frontend unit tests and both manual/batch browser suites
+full ESLint, 77 frontend unit tests and both manual/batch browser suites
 passed. Sample workbook renders are in `/tmp/chronosync-annex-qa/` for this session.
 
-Provider transport was simulated using the actual HTTP client. The provider's
-live attachment acceptance and actual email delivery have not been tested. The
-provider documents that invalid attachments can be omitted while the invoice
+Provider transport simulations use the actual HTTP client. The deployed staging
+flow subsequently issued an electronic invoice with the workbook upload and
+verified its archived bytes through storno. Actual email receipt remains pending.
+The provider documents that invalid attachments can be omitted while the invoice
 notification still sends, so a successful invoice response is not a delivery
 receipt. Confirm attachment presence in an authorized staging email before
 production rollout; never reissue an invoice to repair missing email delivery.

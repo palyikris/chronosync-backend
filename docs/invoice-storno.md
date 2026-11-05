@@ -1,7 +1,9 @@
 # Invoice storno
 
-Implemented locally on 4 November 2026. No hosted migration, deployment, real
-invoice cancellation or customer email was performed as part of this change.
+Implemented on 4 November 2026 and verified through the deployed staging flow on
+5 November, including actual test-account storno E-TESZT-2026-2. See the
+[staging verification report](invoice-lifecycle-staging-2026-11-05.md) for the
+current release state and evidence. Production applications have not been promoted.
 
 ## Administrator flow
 
@@ -58,7 +60,7 @@ values, duplicate fields/blocks, unsafe XML and contradictory headers.
 
 ## Release and verification
 
-Apply `supabase/migrations/20261104201736_invoice_storno.sql` after the pending
+For a new installation, apply `supabase/migrations/20261104201736_invoice_storno.sql` after
 `20261104194919_recurring_invoice_configuration.sql` and the existing project
 pricing/multiplier migrations. Deploy the compatible backend and frontend as a
 coordinated release. The ledger has a new `reversed` status, and history requires
@@ -73,7 +75,7 @@ archived clients, automatic scheduling pause, preserved PDFs and snapshots, and
 new reviewed reservations for the same period. English/Hungarian browser checks
 exercise response loss, reference mismatch, recovery and both PDF downloads.
 
-Verification results: 366 backend/database tests passed in the combined run;
+Initial implementation verification on 4 November: 366 backend/database tests passed;
 96 tests requiring other isolated integration environments were skipped. Frontend
 build, affected-file ESLint, 77 frontend unit tests, the extended pricing/storno
 browser suite and 17 existing invoice-dialog browser checks passed. The mobile
@@ -86,9 +88,11 @@ fixture's unrelated clients, projects, timesheets and leave tables. This is not 
 hosted-project security assessment.
 
 A real read-only lookup of an existing staging invoice verified the query
-namespace, format, amount fields and omitted cancellation flag. Full provider
-storno issuance and customer delivery have not been exercised; local mocks and
-schema checks do not establish those layers or deployed readiness.
+namespace, format, amount fields and omitted cancellation flag. On 5 November,
+the deployed browser issued E-TESZT-2026-1 and reversed it as E-TESZT-2026-2.
+Provider queries, database state and retained downloads passed; the final suite
+passed 398 tests with 96 skipped. Email receipt remains pending. See the linked
+staging report for the exact deployment scope and evidence.
 
 ## Provider sources
 
