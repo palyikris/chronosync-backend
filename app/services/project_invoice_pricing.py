@@ -92,6 +92,9 @@ async def build_project_lines(
                 if unit.strip().casefold() in MONTHLY_UNITS and quantity != 1:
                     raise HTTPException(409, f"Monthly project '{name}' requires quantity 1.")
         try:
+            # Saved numeric quantities and browser JSON numbers must produce
+            # the same reviewed snapshot, including its fingerprint.
+            quantity = quantity.normalize()
             item = InvoiceLineItem(name=name, quantity=quantity, unit=unit,
                 net_unit_price=price["indexed_fee"], vat_rate=vat_code)
             net, vat, gross = calculate_line_totals(item, currency=price["currency"], tax_subject=tax_subject)

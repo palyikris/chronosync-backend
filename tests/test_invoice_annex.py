@@ -113,6 +113,25 @@ def test_attachment_preferences_and_language_are_part_of_actual_review_fingerpri
         assert disabled.review_fingerprint!=first.review_fingerprint
 
 
+def test_saved_quantity_review_survives_browser_number_roundtrip():
+    db=Database()
+    db.tables['client_billing_profiles'][0]['attach_timesheet_report']=True
+    db.tables['project_pricing'][1]['recurring_quantity']='1.0000'
+    params=dict(user_jwt='test',company_id=COMPANY,client_id=CLIENT,
+        period_start=date(2026,10,1),period_end=date(2026,10,31))
+    with patch.object(SupabaseDataService,'get_authenticated_client',AsyncMock(return_value=db)), \
+         patch.object(SupabaseDataService,'_close_authenticated_client',AsyncMock()), \
+         patch.object(SupabaseDataService,'_assert_invoice_attachment_access_with_client',AsyncMock()):
+        first=asyncio.run(Invoices.build_invoice_review(**params,project_quantities={}))
+        quantities={UUID(key):Decimal(str(float(value))) for key,value in first.project_quantities.items()}
+        repeated=asyncio.run(Invoices.build_invoice_review(**params,project_quantities=quantities))
+        assert repeated.review_fingerprint==first.review_fingerprint
+        assert repeated.attachment==first.attachment
+        attachment=asyncio.run(Invoices.preview_invoice_attachment(**params,
+            project_quantities=quantities,review_fingerprint=first.review_fingerprint))
+        assert hashlib.sha256(attachment.content).hexdigest()==first.attachment.sha256
+
+
 @pytest.mark.parametrize('email',[True,False])
 def test_issuance_saves_reviewed_bytes_before_provider_and_only_uploads_when_email_enabled(email):
     review,attachment=attach_review(email=email)
