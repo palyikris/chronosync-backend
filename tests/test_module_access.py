@@ -72,7 +72,8 @@ def test_disabled_attachment_module_blocks_before_any_timesheet_query_and_closes
     close.assert_awaited_once_with(client)
 
 
-def test_first_module_does_not_grant_invoice_history_access():
+@pytest.mark.parametrize("client_id", [None, "30000000-0000-0000-0000-000000000003"])
+def test_first_module_does_not_grant_invoice_history_access(client_id):
     def table(name):
         if name == "profiles":
             return Query([{"id": USER, "company_id": COMPANY, "role": "company_admin", "is_active": True}])
@@ -83,5 +84,5 @@ def test_first_module_does_not_grant_invoice_history_access():
     with patch.object(SupabaseDataService, "get_authenticated_client", AsyncMock(return_value=client)), \
          patch.object(SupabaseDataService, "_close_authenticated_client", AsyncMock()):
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(ClientInvoiceService.list_invoice_history(user_jwt=token, company_id=COMPANY))
+            asyncio.run(ClientInvoiceService.list_invoice_history(user_jwt=token, company_id=COMPANY, client_id=client_id))
     assert exc.value.status_code == 403

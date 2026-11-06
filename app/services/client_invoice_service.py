@@ -451,6 +451,7 @@ class ClientInvoiceService:
         user_jwt: str,
         company_id: UUID,
         limit: int = 50,
+        client_id: UUID | None = None,
     ) -> list[InvoiceHistoryItem]:
         supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
@@ -461,11 +462,15 @@ class ClientInvoiceService:
                 "expire_stale_manual_invoice_attempts",
                 {"p_company_id": str(company_id)},
             ).execute()
-            response = await (
+            query = (
                 supabase.table("invoice_ledger")
                 .select(cls.HISTORY_COLUMNS)
                 .eq("company_id", str(company_id))
-                .order("created_at", desc=True)
+            )
+            if client_id is not None:
+                query = query.eq("client_id", str(client_id))
+            response = await (
+                query.order("created_at", desc=True)
                 .limit(max(1, min(limit, 100)))
                 .execute()
             )

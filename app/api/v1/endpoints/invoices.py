@@ -205,12 +205,14 @@ async def download_invoice_attachment(
 async def invoice_history(
     company_id: UUID,
     limit: int = 50,
+    client_id: UUID | None = None,
     token: str = Depends(extract_bearer_token),
 ) -> list[InvoiceHistoryItem]:
     return await ClientInvoiceService.list_invoice_history(
         user_jwt=token,
         company_id=company_id,
         limit=limit,
+        client_id=client_id,
     )
 
 
