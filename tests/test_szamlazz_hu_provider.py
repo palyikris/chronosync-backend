@@ -195,6 +195,21 @@ def invoice_payload(**overrides):
     return payload
 
 
+def test_electronic_invoice_preserves_seller_bank_prefix_dates_and_notes():
+    payload = InvoiceCreateRequest.model_validate(invoice_payload(
+        e_invoice=True, seller_bank_name="K&H Bank", seller_bank_account="HU61-TEST",
+        invoice_prefix="E-ECS", fulfillment_date="2026-11-08",
+        comment="Service period: 2026-10-01 - 2026-10-31"))
+    root = ElementTree.fromstring(SzamlazzHuProvider('test-key').build_invoice_xml(payload))
+    ns = {'s': SzamlazzHuProvider.XML_NAMESPACE}
+    assert root.find('s:beallitasok/s:eszamla', ns).text == 'true'
+    assert root.find('s:elado/s:bank', ns).text == 'K&H Bank'
+    assert root.find('s:elado/s:bankszamlaszam', ns).text == 'HU61-TEST'
+    assert root.find('s:fejlec/s:szamlaszamElotag', ns).text == 'E-ECS'
+    assert root.find('s:fejlec/s:teljesitesDatum', ns).text == '2026-11-08'
+    assert root.find('s:fejlec/s:megjegyzes', ns).text == payload.comment
+
+
 def find_text(root, name):
     namespace = {"s": SzamlazzHuProvider.XML_NAMESPACE}
     return root.findtext(f".//s:{name}", namespaces=namespace)
@@ -428,7 +443,9 @@ def test_generated_request_validates_against_downloaded_official_xsd(currency,la
     from pathlib import Path
     if not shutil.which('xmllint'):
         pytest.skip('xmllint is required for official XSD validation')
-    payload=invoice_payload(currency=currency,language=language)
+    payload=invoice_payload(currency=currency,language=language,e_invoice=True,
+        seller_bank_name='K&H Bank',seller_bank_account='HU61-TEST',
+        invoice_prefix='E-ECS',comment='Service period: 2026-10-01 - 2026-10-31')
     payload['customer']['name']='Árvíztűrő & <Partner> "Kft."'
     schema=Path(__file__).parent/'fixtures/szamlazz/xmlszamla.xsd'
     xml=SzamlazzHuProvider('dummy-key').build_invoice_xml(InvoiceCreateRequest.model_validate(payload))

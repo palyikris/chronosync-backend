@@ -20,3 +20,8 @@ The unchanged PDF-query schema `xmlszamlapdf.xsd` was downloaded on 2026-10-27
 from https://www.szamlazz.hu/szamla/docs/xsds/agentpdf/xmlszamlapdf.xsd.
 SHA-256: `b9b161d1356bcd10791605f74c390a0b2b347fdc19a4cf074f76f8a91fe3cfdf`.
 The recovery transport test validates its generated request with `xmllint --nonet`.
+
+The unchanged reversal schema `xmlszamlast.xsd` was downloaded on 2026-11-04
+from https://www.szamlazz.hu/szamla/docs/xsds/agentst/xmlszamlast.xsd.
+SHA-256: `6f9d5beb6efd205f0509e7413e15fb96660ee89c9f169d27c4972d3b24127a3a`.
+The storno transport tests validate generated requests with `xmllint --nonet`.

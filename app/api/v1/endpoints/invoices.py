@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from app.api.v1.endpoints.reports import extract_bearer_token
 from app.schemas.invoices import (
     ClientInvoiceIssueRequest,
+    ClientInvoiceAttachmentRequest,
     ClientInvoicePreviewRequest,
     ClientInvoiceReview,
     ClientInvoiceReviewRequest,
@@ -14,10 +15,14 @@ from app.schemas.invoices import (
     InvoiceHistoryItem,
     InvoicePreviewRequest,
     InvoiceReconciliationRequest,
+    InvoiceStornoRequest,
+    InvoiceStornoReconciliationRequest,
 )
 from app.services.client_invoice_service import ClientInvoiceService
 from app.services.company_service import CompanyCredentialService
 from app.services.invoice_batch_service import InvoiceBatchService
+from app.services.invoice_storno_service import InvoiceStornoService
+from app.services.invoice_providers.base import InvoiceEmailAttachment
 from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuError,
     SzamlazzHuProvider,
@@ -75,6 +80,12 @@ def _pdf_response(pdf: bytes, filename: str) -> Response:
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+def _attachment_response(attachment: InvoiceEmailAttachment) -> Response:
+    return Response(content=attachment.content, media_type=attachment.media_type,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                 "Content-Disposition": f'attachment; filename="{attachment.filename}"'})
 
 
 @router.post(
@@ -170,6 +181,26 @@ async def issue_client_invoice(
     )
 
 
+@router.post("/client-attachment", response_class=Response, response_model=None)
+async def preview_client_attachment(
+    payload: ClientInvoiceAttachmentRequest, token: str = Depends(extract_bearer_token),
+) -> Response:
+    attachment = await ClientInvoiceService.preview_invoice_attachment(user_jwt=token,
+        company_id=payload.company_id, client_id=payload.client_id,
+        period_start=payload.period_start, period_end=payload.period_end,
+        review_fingerprint=payload.review_fingerprint, project_quantities=payload.project_quantities)
+    return _attachment_response(attachment)
+
+
+@router.get("/{invoice_id}/attachment", response_class=Response, response_model=None)
+async def download_invoice_attachment(
+    invoice_id: UUID, company_id: UUID, token: str = Depends(extract_bearer_token),
+) -> Response:
+    attachment = await ClientInvoiceService.get_invoice_attachment(user_jwt=token,
+        company_id=company_id, invoice_id=invoice_id)
+    return _attachment_response(attachment)
+
+
 @router.get("/history", response_model=list[InvoiceHistoryItem])
 async def invoice_history(
     company_id: UUID,
@@ -218,3 +249,35 @@ async def reconcile_invoice(
         net_total=payload.net_total,
         gross_total=payload.gross_total,
     )
+
+
+@router.post("/{invoice_id}/storno", response_model=InvoiceHistoryItem)
+async def reverse_invoice(
+    invoice_id: UUID, payload: InvoiceStornoRequest,
+    token: str = Depends(extract_bearer_token),
+) -> InvoiceHistoryItem:
+    return await InvoiceStornoService.reverse(user_jwt=token, invoice_id=invoice_id,
+        company_id=payload.company_id, original_invoice_number=payload.original_invoice_number,
+        reason=payload.reason)
+
+
+@router.post("/{invoice_id}/storno/reconcile", response_model=InvoiceHistoryItem)
+async def reconcile_storno(
+    invoice_id: UUID, payload: InvoiceStornoReconciliationRequest,
+    token: str = Depends(extract_bearer_token),
+) -> InvoiceHistoryItem:
+    return await InvoiceStornoService.reconcile(user_jwt=token, invoice_id=invoice_id,
+        company_id=payload.company_id, original_invoice_number=payload.original_invoice_number,
+        reason=payload.reason, resolution=payload.resolution,
+        reversal_invoice_number=payload.reversal_invoice_number)
+
+
+@router.get("/{invoice_id}/storno/pdf", response_class=Response, response_model=None,
+            responses={200: {"content": {"application/pdf": {}}}})
+async def download_storno_pdf(
+    invoice_id: UUID, company_id: UUID,
+    token: str = Depends(extract_bearer_token),
+) -> Response:
+    pdf, filename = await InvoiceStornoService.download_pdf(user_jwt=token,
+        company_id=company_id, invoice_id=invoice_id)
+    return _pdf_response(pdf, filename)

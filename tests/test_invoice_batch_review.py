@@ -225,3 +225,11 @@ def test_batch_review_route_requires_auth_and_serializes_fingerprints(batch):
     assert response.status_code == 200
     assert response.json()[0]["review"]["review_fingerprint"] == "a" * 64
     assert response.json()[0]["reason"] is None
+
+
+def test_oversized_required_report_skips_only_its_client(batch):
+    batch.review.side_effect=[HTTPException(413,'The billing report exceeds the 2 MB attachment limit.'),
+        invoice_review().model_copy(update={'client_id':SECOND_CLIENT})]
+    result=run_batch()
+    assert result[0].review is None and '2 MB' in result[0].reason
+    assert result[1].review.client_id==SECOND_CLIENT

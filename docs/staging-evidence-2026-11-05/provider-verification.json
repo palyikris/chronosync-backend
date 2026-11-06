@@ -1,0 +1,38 @@
+{
+  "original": {
+    "invoice_number": "E-TESZT-2026-1",
+    "document_type": "SZ",
+    "original_invoice_number": null,
+    "format": "3",
+    "issue_date": "2026-11-05",
+    "currency": "HUF",
+    "reversed": true,
+    "net_total": "289000",
+    "gross_total": "367030"
+  },
+  "reversal": {
+    "invoice_number": "E-TESZT-2026-2",
+    "document_type": "SS",
+    "original_invoice_number": "E-TESZT-2026-1",
+    "format": "3",
+    "issue_date": "2026-11-05",
+    "currency": "HUF",
+    "reversed": false,
+    "net_total": "-289000",
+    "gross_total": "-367030"
+  },
+  "email_and_test_fields": [
+    {
+      "path": "/szamla/alap/email",
+      "value": "invoice-lifecycle-test@example.com"
+    },
+    {
+      "path": "/szamla/alap/teszt",
+      "value": "true"
+    },
+    {
+      "path": "/szamla/vevo/email",
+      "value": "invoice-lifecycle-test@example.com"
+    }
+  ]
+}

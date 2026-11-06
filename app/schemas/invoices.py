@@ -174,6 +174,8 @@ class InvoiceCreateRequest(InvoiceTextModel):
     external_id: str | None = Field(default=None, max_length=100)
     invoice_prefix: str | None = Field(default=None, max_length=32)
     e_invoice: bool = False
+    seller_bank_name: str | None = Field(default=None, min_length=1, max_length=120)
+    seller_bank_account: str | None = Field(default=None, min_length=1, max_length=120)
     download_pdf: bool = True
     preview: bool = True
     customer: InvoiceCustomer
@@ -189,6 +191,8 @@ class InvoiceCreateRequest(InvoiceTextModel):
 
     @model_validator(mode="after")
     def validate_dates(self) -> Self:
+        if bool(self.seller_bank_name) != bool(self.seller_bank_account):
+            raise ValueError("seller bank name and account must be provided together")
         if self.due_date < self.issue_date:
             raise ValueError("due_date must be on or after issue_date")
         if (
@@ -276,6 +280,9 @@ class InvoiceReviewEntry(BaseModel):
 class InvoiceReviewProjectLine(BaseModel):
     project_id: UUID
     project_name: str
+    invoice_name: str | None = None
+    invoice_note: str | None = None
+    po_number: str | None = None
     is_payroll: bool = False
     logged_hours: Decimal | None = None
     pricing_year: int
@@ -288,6 +295,14 @@ class InvoiceReviewProjectLine(BaseModel):
     net_total: Decimal
     vat_total: Decimal
     gross_total: Decimal
+
+
+class InvoiceAttachmentInfo(BaseModel):
+    filename: str = Field(pattern=r"^[A-Za-z0-9_-]{1,120}\.xlsx$")
+    media_type: Literal["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    size_bytes: int = Field(gt=0, le=2_000_000)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    language: Literal["hu", "en"]
 
 
 class ClientInvoiceReview(BaseModel):
@@ -310,6 +325,13 @@ class ClientInvoiceReview(BaseModel):
     vat_code: str
     currency: str
     exchange_rate_bank: str | None = None
+    e_invoice: bool = False
+    invoice_prefix: str | None = None
+    seller_bank_name: str | None = None
+    seller_bank_account: str | None = None
+    invoice_comment: str | None = None
+    attach_timesheet_report: bool = False
+    attachment: InvoiceAttachmentInfo | None = None
     billing_profile_updated_at: datetime | None = None
     net_total: Decimal
     vat_total: Decimal
@@ -324,6 +346,10 @@ class ClientInvoiceReview(BaseModel):
 class ClientInvoiceIssueRequest(ClientInvoiceReviewRequest):
     review_fingerprint: str = Field(min_length=64, max_length=64)
     confirm: Literal[True]
+
+
+class ClientInvoiceAttachmentRequest(ClientInvoiceReviewRequest):
+    review_fingerprint: str = Field(min_length=64, max_length=64)
 
 
 class InvoiceBatchReviewRequest(BaseModel):
@@ -350,7 +376,42 @@ class InvoiceBatchReviewItem(BaseModel):
     reason: str | None = None
 
 
-InvoiceLedgerStatus = Literal["issuing", "issued", "uncertain", "failed"]
+InvoiceLedgerStatus = Literal["issuing", "issued", "uncertain", "failed", "reversed"]
+
+
+class InvoiceReversalDetails(BaseModel):
+    id: UUID
+    status: Literal["reversing", "uncertain", "failed", "reversed"]
+    reason: str
+    issue_date: date
+    e_invoice: bool
+    invoice_number: str | None = None
+    net_total: Decimal | None = None
+    gross_total: Decimal | None = None
+    pdf_available: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    attempt_count: int
+    reversed_at: datetime | None = None
+
+
+class InvoiceStornoRequest(InvoiceTextModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    company_id: UUID
+    original_invoice_number: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=500)
+    confirm: Literal[True]
+
+
+class InvoiceStornoReconciliationRequest(InvoiceStornoRequest):
+    resolution: Literal["reversed", "not_reversed"]
+    reversal_invoice_number: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def require_reversal_number(self) -> Self:
+        if self.resolution == "reversed" and not self.reversal_invoice_number:
+            raise ValueError("reversal_invoice_number is required")
+        return self
 
 
 class InvoiceHistoryItem(BaseModel):
@@ -376,6 +437,9 @@ class InvoiceHistoryItem(BaseModel):
     gross_total: Decimal
     invoice_number: str | None = None
     pdf_available: bool
+    attachment: InvoiceAttachmentInfo | None = None
+    attachment_available: bool = False
+    reversal: InvoiceReversalDetails | None = None
     provider_error_code: str | None = None
     provider_error_message: str | None = None
     attempt_count: int
