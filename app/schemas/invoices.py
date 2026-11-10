@@ -219,6 +219,21 @@ class InvoicePreviewRequest(BaseModel):
     invoice: InvoiceCreateRequest
 
 
+class InvoiceDateOverrides(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    due_date: date | None = None
+    fulfillment_date: date | None = None
+
+    @field_validator("due_date", "fulfillment_date", mode="before")
+    @classmethod
+    def require_calendar_date(cls, value: object) -> object:
+        if value is not None and not (
+            type(value) is date or isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)
+        ):
+            raise ValueError("use a calendar date in YYYY-MM-DD format")
+        return value
+
+
 class ClientInvoicePreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     company_id: UUID
@@ -226,6 +241,8 @@ class ClientInvoicePreviewRequest(BaseModel):
     period_start: date
     period_end: date
     project_quantities: dict[UUID, Annotated[Decimal, Field(ge=0, le=999999, allow_inf_nan=False)]] = Field(default_factory=dict, max_length=500)
+    date_overrides: InvoiceDateOverrides = Field(default_factory=InvoiceDateOverrides)
+    review_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def validate_period(self) -> Self:
@@ -243,6 +260,7 @@ class ClientInvoiceReviewRequest(BaseModel):
     period_start: date
     period_end: date
     project_quantities: dict[UUID, Annotated[Decimal, Field(ge=0, le=999999, allow_inf_nan=False)]] = Field(default_factory=dict, max_length=500)
+    date_overrides: InvoiceDateOverrides = Field(default_factory=InvoiceDateOverrides)
 
     @model_validator(mode="after")
     def validate_period(self) -> Self:
@@ -306,6 +324,7 @@ class InvoiceAttachmentInfo(BaseModel):
 
 
 class ClientInvoiceReview(BaseModel):
+    date_overrides: InvoiceDateOverrides = Field(default_factory=InvoiceDateOverrides)
     company_id: UUID
     client_id: UUID
     client_code: str

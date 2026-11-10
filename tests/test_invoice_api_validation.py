@@ -12,6 +12,9 @@ from app.services.client_invoice_service import ClientInvoiceService
     {}, {'confirm':False}, {'confirm':'true'}, {'confirm':True,'review_fingerprint':'bad'},
     {'confirm':True,'period_end':'2026-08-31'},
     {'confirm':True,'period_end':'2028-09-30'},
+    {'confirm':True,'date_overrides':{'issue_date':'2026-09-01'}},
+    {'confirm':True,'date_overrides':{'due_date':'2026-02-30'}},
+    {'confirm':True,'date_overrides':{'due_date':1795132800}},
 ])
 def test_issue_route_rejects_unconfirmed_or_invalid_payload(override):
     payload={'company_id':'10000000-0000-0000-0000-000000000001',

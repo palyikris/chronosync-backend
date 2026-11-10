@@ -125,6 +125,8 @@ async def preview_client_invoice(
         period_start=payload.period_start,
         period_end=payload.period_end,
         project_quantities=payload.project_quantities,
+        date_overrides=payload.date_overrides,
+        review_fingerprint=payload.review_fingerprint,
     )
     pdf = await _generate_preview_pdf(
         token=token,
@@ -153,6 +155,7 @@ async def review_client_invoice(
         period_start=payload.period_start,
         period_end=payload.period_end,
         project_quantities=payload.project_quantities,
+        date_overrides=payload.date_overrides,
     )
 
 
@@ -178,6 +181,7 @@ async def issue_client_invoice(
         period_end=payload.period_end,
         review_fingerprint=payload.review_fingerprint,
         project_quantities=payload.project_quantities,
+        date_overrides=payload.date_overrides,
     )
 
 
@@ -188,7 +192,8 @@ async def preview_client_attachment(
     attachment = await ClientInvoiceService.preview_invoice_attachment(user_jwt=token,
         company_id=payload.company_id, client_id=payload.client_id,
         period_start=payload.period_start, period_end=payload.period_end,
-        review_fingerprint=payload.review_fingerprint, project_quantities=payload.project_quantities)
+        review_fingerprint=payload.review_fingerprint, project_quantities=payload.project_quantities,
+        date_overrides=payload.date_overrides)
     return _attachment_response(attachment)
 
 

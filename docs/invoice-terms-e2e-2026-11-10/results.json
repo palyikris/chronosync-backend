@@ -1,0 +1,301 @@
+{
+  "company_id": "aecc1a65-66a8-42ed-a44f-baed35fdfcbe",
+  "company": "Test Inc invoice terms staging 2026-11-10",
+  "source": "updated local frontend/backend with hosted Supabase and real Teszt ceg provider",
+  "checks": [
+    {
+      "check": "default_rules_preserved",
+      "passed": true,
+      "due_date": "2026-11-18",
+      "fulfillment_date": "2026-10-31"
+    },
+    {
+      "check": "approved_hours_and_amounts",
+      "passed": true,
+      "quantity": "2.5",
+      "net": "25000",
+      "gross": "31750"
+    },
+    {
+      "check": "regular_user_cannot_review",
+      "passed": true,
+      "status": 403
+    },
+    {
+      "check": "regular_user_cannot_change_invoice_terms",
+      "passed": true,
+      "status": 200
+    },
+    {
+      "check": "cross_tenant_review_denied",
+      "passed": true,
+      "status": 403
+    },
+    {
+      "check": "past_due",
+      "passed": true,
+      "status": 409
+    },
+    {
+      "check": "too_far",
+      "passed": true,
+      "status": 409
+    },
+    {
+      "check": "datetime_rejected",
+      "passed": true,
+      "status": 422
+    },
+    {
+      "check": "unknown_override_rejected",
+      "passed": true,
+      "status": 422
+    },
+    {
+      "check": "hosted_note_limit_enforced",
+      "passed": true
+    },
+    {
+      "check": "saved_note_and_month_end",
+      "passed": true,
+      "due_date": "2026-11-30",
+      "fulfillment_date": "2026-11-30"
+    },
+    {
+      "check": "month_end_reference_is_explicit",
+      "passed": true,
+      "due_date": "2026-12-31"
+    },
+    {
+      "check": "stale_client-preview_blocked",
+      "passed": true,
+      "status": 409
+    },
+    {
+      "check": "stale_client-attachment_blocked",
+      "passed": true,
+      "status": 409
+    },
+    {
+      "check": "stale_client-issue_blocked",
+      "passed": true,
+      "status": 409
+    },
+    {
+      "check": "manual_dates_reviewed",
+      "passed": true,
+      "due_date": "2027-01-15",
+      "fulfillment_date": "2026-11-05"
+    },
+    {
+      "check": "real_provider_preview_with_terms",
+      "passed": true,
+      "status": 200,
+      "bytes": 21328
+    },
+    {
+      "check": "fixture_reset_for_browser_save",
+      "passed": true
+    },
+    {
+      "check": "browser_saved_terms_persisted",
+      "passed": true
+    },
+    {
+      "check": "browser_preview_gate_disabled_issuance",
+      "passed": true
+    },
+    {
+      "check": "isolated_staging_issuance_enabled",
+      "passed": true
+    },
+    {
+      "check": "browser_review_saved_month_end_note",
+      "passed": true
+    },
+    {
+      "check": "browser_date_edit_clears_confirmation_and_disables_actions",
+      "passed": true
+    },
+    {
+      "check": "browser_refresh_requires_new_confirmation",
+      "passed": true
+    },
+    {
+      "check": "browser_refreshed_provider_preview_downloaded",
+      "passed": true
+    },
+    {
+      "check": "reviewed_annex_downloaded",
+      "passed": true
+    },
+    {
+      "check": "browser_invoice_issued_once",
+      "passed": true,
+      "invoice_id": "5260502f-e622-45aa-aab1-df3a3729f5b9",
+      "invoice_number": "TESZT-2026-14"
+    },
+    {
+      "check": "ledger_preserves_confirmed_terms",
+      "passed": true
+    },
+    {
+      "check": "ledger_matches_review_totals",
+      "passed": true,
+      "net": 25000.0,
+      "vat": 6750.0,
+      "gross": 31750.0
+    },
+    {
+      "check": "email_disabled_end_to_end",
+      "passed": true
+    },
+    {
+      "check": "archived_pdf_available",
+      "passed": true,
+      "bytes": 21117,
+      "sha256": "83042b72d36d21628d9b4002c456023304dda2a8f37f128571b18c4bb18d8752"
+    },
+    {
+      "check": "archived_annex_matches_reviewed_bytes",
+      "passed": true,
+      "sha256": "461cc007c34eeaec69c68765fbbeb9cbae672b3854e32fbd95ab0d1d7efafc3e"
+    },
+    {
+      "check": "only_approved_work_finalized",
+      "passed": true,
+      "statuses": [
+        "draft",
+        "invoiced",
+        "rejected",
+        "submitted"
+      ]
+    },
+    {
+      "check": "duplicate_issuance_blocked",
+      "passed": true,
+      "status": 404
+    },
+    {
+      "check": "duplicate_created_no_second_ledger",
+      "passed": true
+    },
+    {
+      "check": "archived_pdf_immutable_after_profile_edit",
+      "passed": true
+    },
+    {
+      "check": "provider_number_and_totals_match",
+      "passed": true,
+      "invoice_number": "TESZT-2026-14"
+    },
+    {
+      "check": "provider_test_flag_dates_and_note_match_review",
+      "passed": true
+    },
+    {
+      "check": "issued_and_browser_preview_pdf_text_matches_review",
+      "passed": true
+    },
+    {
+      "check": "browser_storno_confirmed",
+      "passed": true,
+      "storno_number": "TESZT-2026-15"
+    },
+    {
+      "check": "archived_storno_pdf_available",
+      "passed": true,
+      "bytes": 21569
+    },
+    {
+      "check": "storno_restores_approved_work_only",
+      "passed": true
+    },
+    {
+      "check": "original_pdf_retained_after_storno",
+      "passed": true
+    },
+    {
+      "check": "regular_user_pdf_denied",
+      "passed": true,
+      "status": 403
+    },
+    {
+      "check": "cross_tenant_pdf_denied",
+      "passed": true,
+      "status": 403
+    },
+    {
+      "check": "provider_storno_links_original",
+      "passed": true,
+      "original_reversed": true,
+      "storno_number": "TESZT-2026-15"
+    },
+    {
+      "check": "browser_pre_review_custom_dates_preserved",
+      "passed": true
+    },
+    {
+      "check": "issued_and_preview_pdfs_visually_verified",
+      "passed": true
+    },
+    {
+      "check": "temporary_sessions_revoked",
+      "passed": true
+    },
+    {
+      "check": "staging_credential_removed",
+      "passed": true
+    },
+    {
+      "check": "temporary_passwords_cleared_and_identities_banned",
+      "passed": true
+    },
+    {
+      "check": "isolated_staging_company_disabled",
+      "passed": true
+    },
+    {
+      "check": "existing_profiles_companies_ledger_unchanged",
+      "passed": true
+    },
+    {
+      "check": "no_unsettled_invoices",
+      "passed": true
+    }
+  ],
+  "review": {
+    "due_date": "2027-01-15",
+    "fulfillment_date": "2026-11-05",
+    "net": "25000",
+    "vat": "6750",
+    "gross": "31750",
+    "approved_entries": 2,
+    "review_fingerprint": "333018cfe3ac89622f6079310bcfe9b76f861d32e1831e5f94989dfb5014e812"
+  },
+  "annex_sha256": "461cc007c34eeaec69c68765fbbeb9cbae672b3854e32fbd95ab0d1d7efafc3e",
+  "invoice_id": "5260502f-e622-45aa-aab1-df3a3729f5b9",
+  "invoice_number": "TESZT-2026-14",
+  "issued_pdf_sha256": "83042b72d36d21628d9b4002c456023304dda2a8f37f128571b18c4bb18d8752",
+  "storno_number": "TESZT-2026-15",
+  "hosted_migration": "20261110115432_client_invoice_terms",
+  "provider_tenant": "Teszt cég",
+  "provider_test_flag": true,
+  "customer_email_requested": false,
+  "creation_calls": {
+    "invoice": 1,
+    "storno": 1
+  },
+  "application_deployed": false,
+  "focused_regressions": {
+    "passed": 36
+  },
+  "security_advisor_findings_changed": false,
+  "baseline_preserved": {
+    "billing_profiles": 100,
+    "invoice_ledger_rows": 22,
+    "profiles_hash": "19d5610a4008773efcafecf6843a33cf",
+    "companies_hash": "32c7478f5c4c6cd97d6d2fd3d0a8592a",
+    "ledger_hash": "48f9f3569001625a2b261ac4b6a40613"
+  }
+}

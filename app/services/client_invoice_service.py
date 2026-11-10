@@ -3,7 +3,7 @@ import base64
 import hashlib
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from app.schemas.invoices import (
     ClientInvoiceReview,
     InvoiceCreateRequest,
+    InvoiceDateOverrides,
     InvoiceHistoryItem,
     InvoiceAttachmentInfo,
     InvoiceReversalDetails,
@@ -25,6 +26,7 @@ from app.schemas.invoices import (
 )
 from app.services.company_service import CompanyCredentialService
 from app.services.invoice_annex_service import InvoiceAnnexService
+from app.services.invoice_terms import build_invoice_comment, resolve_invoice_dates
 from app.services.invoice_providers.base import InvoiceEmailAttachment
 from app.services.invoice_providers.amounts import calculate_line_totals
 from app.services.invoice_providers.szamlazz_hu import (
@@ -67,11 +69,16 @@ class ClientInvoiceService:
         period_start: date,
         period_end: date,
         project_quantities: dict[UUID, Decimal] | None = None,
+        date_overrides: InvoiceDateOverrides | None = None,
+        review_fingerprint: str | None = None,
     ) -> tuple[InvoiceCreateRequest, str]:
         review, invoice = await cls._build_review_context(
             user_jwt=user_jwt, company_id=company_id, client_id=client_id,
             period_start=period_start, period_end=period_end, project_quantities=project_quantities,
+            date_overrides=date_overrides,
         )
+        if review_fingerprint is not None and review.review_fingerprint != review_fingerprint:
+            raise HTTPException(409, "The invoice changed after review. Refresh before downloading its preview.")
         return invoice.model_copy(update={"preview": True,
             "customer": invoice.customer.model_copy(update={"send_email": False})}), review.client_code
 
@@ -85,6 +92,7 @@ class ClientInvoiceService:
         period_start: date,
         period_end: date,
         project_quantities: dict[UUID, Decimal] | None = None,
+        date_overrides: InvoiceDateOverrides | None = None,
     ) -> ClientInvoiceReview:
         review, _ = await cls._build_review_context(
             user_jwt=user_jwt,
@@ -93,6 +101,7 @@ class ClientInvoiceService:
             period_start=period_start,
             period_end=period_end,
             project_quantities=project_quantities,
+            date_overrides=date_overrides,
         )
         return review
 
@@ -106,6 +115,7 @@ class ClientInvoiceService:
         period_start: date,
         period_end: date,
         project_quantities: dict[UUID, Decimal] | None = None,
+        date_overrides: InvoiceDateOverrides | None = None,
     ) -> tuple[ClientInvoiceReview, InvoiceCreateRequest]:
         supabase = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
@@ -137,6 +147,7 @@ class ClientInvoiceService:
                 profile=profile,
                 lines=lines,
                 preview=False,
+                date_overrides=date_overrides,
             )
             net_total, vat_total, gross_total = cls._calculate_totals(invoice)
             recipient = InvoiceReviewRecipient(
@@ -159,6 +170,7 @@ class ClientInvoiceService:
                 "client_name": str(client.get("name") or client_code),
                 "period_start": period_start,
                 "period_end": period_end,
+                "date_overrides": date_overrides or InvoiceDateOverrides(),
                 "issue_date": invoice.issue_date,
                 "fulfillment_date": invoice.fulfillment_date,
                 "due_date": invoice.due_date,
@@ -216,6 +228,7 @@ class ClientInvoiceService:
         period_end: date,
         review_fingerprint: str,
         project_quantities: dict[UUID, Decimal] | None = None,
+        date_overrides: InvoiceDateOverrides | None = None,
     ) -> InvoiceHistoryItem:
         review, invoice = await cls._build_review_context(
             user_jwt=user_jwt,
@@ -224,6 +237,7 @@ class ClientInvoiceService:
             period_start=period_start,
             period_end=period_end,
             project_quantities=project_quantities,
+            date_overrides=date_overrides,
         )
         if review.review_fingerprint != review_fingerprint:
             raise HTTPException(
@@ -529,10 +543,11 @@ class ClientInvoiceService:
     @classmethod
     async def preview_invoice_attachment(cls, *, user_jwt: str, company_id: UUID,
         client_id: UUID, period_start: date, period_end: date, review_fingerprint: str,
-        project_quantities: dict[UUID, Decimal] | None = None) -> InvoiceEmailAttachment:
+        project_quantities: dict[UUID, Decimal] | None = None,
+        date_overrides: InvoiceDateOverrides | None = None) -> InvoiceEmailAttachment:
         review = await cls.build_invoice_review(user_jwt=user_jwt, company_id=company_id,
             client_id=client_id, period_start=period_start, period_end=period_end,
-            project_quantities=project_quantities)
+            project_quantities=project_quantities, date_overrides=date_overrides)
         if review.review_fingerprint != review_fingerprint:
             raise HTTPException(409, "The invoice changed after review. Refresh before downloading its report.")
         attachment = await cls._build_reviewed_attachment(review)
@@ -758,7 +773,8 @@ class ClientInvoiceService:
                 "tax_number, eu_vat_number, group_tax_number, billing_email, "
                 "send_invoice_email, invoice_language, payment_method, "
                 "payment_term_days, vat_code, updated_at, invoice_electronic, "
-                "fulfillment_date_policy, invoice_prefix, seller_bank_name, seller_bank_account, attach_timesheet_report"
+                "fulfillment_date_policy, invoice_prefix, seller_bank_name, seller_bank_account, attach_timesheet_report, "
+                "invoice_note, payment_due_policy, payment_due_reference, payment_due_month_offset"
             )
             .eq("client_id", str(client_id))
             .eq("company_id", str(company_id))
@@ -830,23 +846,25 @@ class ClientInvoiceService:
         cls, *, company_id: UUID, client_id: UUID, period_start: date,
         period_end: date, client: dict[str, Any], profile: dict[str, Any],
         lines: list[InvoiceReviewProjectLine], preview: bool,
+        date_overrides: InvoiceDateOverrides | None = None,
     ) -> tuple[InvoiceCreateRequest, str]:
         if str(profile.get("vat_code") or "").strip().upper() == "K.AFA":
             raise HTTPException(409, "Margin VAT requires separately configured purchase-price and margin items.")
         if not lines:
             raise HTTPException(409, "No billable project lines were selected.")
         issue_date = datetime.now(cls.BUDAPEST_TIMEZONE).date()
-        due_date = issue_date + timedelta(days=int(profile["payment_term_days"]))
-        policy = profile.get("fulfillment_date_policy", "period_end")
-        fulfillment_dates = {"period_end": period_end, "due_date": due_date, "issue_date": issue_date}
-        if policy not in fulfillment_dates:
-            raise HTTPException(409, "Select a valid fulfillment date policy in the billing profile.")
-        period_label = "Elszámolási időszak" if profile["invoice_language"] == "hu" else "Service period"
-        comment = f"{period_label}: {period_start.isoformat()} - {period_end.isoformat()}"
+        try:
+            due_date, fulfillment_date = resolve_invoice_dates(
+                issue_date=issue_date, period_end=period_end, profile=profile,
+                overrides=date_overrides or InvoiceDateOverrides(),
+            )
+            comment = build_invoice_comment(period_start=period_start, period_end=period_end, profile=profile)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise HTTPException(409, str(exc)) from None
         order_number = f"cs-{company_id.hex}-{client_id.hex}-{period_start:%Y%m%d}-{period_end:%Y%m%d}"
         try:
             invoice = InvoiceCreateRequest.model_validate({
-                "issue_date": issue_date, "fulfillment_date": fulfillment_dates[policy],
+                "issue_date": issue_date, "fulfillment_date": fulfillment_date,
                 "due_date": due_date, "payment_method": profile["payment_method"],
                 "currency": lines[0].currency, "language": profile["invoice_language"],
                 "order_number": order_number, "external_id": order_number,
@@ -1080,7 +1098,7 @@ class ClientInvoiceService:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
-                        "The approved entries changed after review. Refresh and review "
+                        "The invoice data or settings changed after review. Refresh and review "
                         "the invoice again."
                     ),
                 ) from exc

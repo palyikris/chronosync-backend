@@ -43,7 +43,8 @@ def schema():
         add net_unit_price numeric, add billing_model text default 'hourly',
         add currency text default 'HUF', add invoice_unit text default 'óra',
         add invoice_item_name text default 'Szolgáltatás', add vat_code text default 'AAM',
-        add payment_term_days integer default 8;""")
+        add payment_term_days integer default 8, add invoice_language text default 'hu',
+        add payment_method text default 'Átutalás';""")
     for name in ['20261022140000_create_manual_invoice_ledger.sql',
                  '20261026083353_harden_manual_invoice_consistency.sql',
                  '20261027091353_avoid_retryable_invoice_business_conflicts.sql']:
@@ -85,6 +86,7 @@ def schema():
     sql((ROOT/'supabase/migrations/20261104201736_invoice_storno.sql').read_text())
     sql("alter table client_billing_profiles add attach_timesheet_report boolean not null default false;")
     sql((ROOT/'supabase/migrations/20261104204746_invoice_annex_delivery.sql').read_text())
+    sql((ROOT/'supabase/migrations/20261110115432_client_invoice_terms.sql').read_text())
     sql("""alter table timesheets add leave_request_id uuid;
       create table public.leave_requests(user_id uuid, status text, start_date date, end_date date);
       grant select on public.leave_requests to authenticated;
@@ -115,7 +117,7 @@ def snapshot():
     dates = json.loads(sql("select json_build_object('issue', (now() at time zone 'Europe/Budapest')::date, 'due', (now() at time zone 'Europe/Budapest')::date + 8)").stdout)
     return {'billing_model': 'project', 'billing_profile_updated_at': '2026-10-22T00:00:00Z',
         'issue_date': dates['issue'], 'due_date': dates['due'], 'fulfillment_date': '2026-10-31',
-        'e_invoice': False,
+        'e_invoice': False, 'invoice_comment': 'Elszámolási időszak: 2026-10-01 - 2026-10-31',
         'project_quantities': {}, 'approved_entries': [{'id': ENTRY, 'project_id': PROJECT,
             'work_date': '2026-10-15', 'hours_logged': '2.5', 'billing_multiplier': 1, 'description': 'Work', 'project_name': 'Consulting'}],
         'items': [{'is_payroll': False, 'project_id': PROJECT, 'project_name': 'Consulting', 'pricing_year': 2026,
@@ -132,6 +134,99 @@ def reserve(review=None, *, model='project', quantity='1', net='250', vat='0', g
         json.dumps([e['id'] for e in review['approved_entries']])]
     def quote(v): return 'null' if v is None else 'false' if v is False else "'"+str(v).replace("'", "''")+"'"
     return sql('select * from reserve_manual_invoice('+','.join(map(quote, values))+');', identity, check=False)
+
+
+def test_invoice_terms_migration_preserves_defaults_and_private_permissions():
+    assert sql("select payment_due_policy || ':' || payment_due_reference || ':' || payment_due_month_offset from client_billing_profiles").stdout.strip() == 'days_after_issue:issue_date:1'
+    assert reserve().returncode == 0
+    assert sql("select has_function_privilege('authenticated','private.validate_project_invoice_prices(uuid,uuid,date,date,jsonb,text,text,numeric,numeric,numeric)','execute')").stdout.strip() == 'f'
+
+
+@pytest.mark.parametrize('reference,offset', [('issue_date', 0), ('issue_date', 1), ('issue_date', 2), ('period_end', 1), ('period_end', 2)])
+def test_month_end_deadlines_are_revalidated_at_reservation(reference, offset):
+    sql(f"update client_billing_profiles set payment_due_policy='month_end', payment_due_reference='{reference}', payment_due_month_offset={offset}, fulfillment_date_policy='due_date'")
+    anchor = "(now() at time zone 'Europe/Budapest')::date" if reference == 'issue_date' else "date '2026-10-31'"
+    due = sql(f"select (date_trunc('month',{anchor}) + make_interval(months=>{offset+1}) - interval '1 day')::date").stdout.strip()
+    review = snapshot()
+    review.update(due_date=due, fulfillment_date=due)
+    assert reserve(review).returncode == 0
+    stored = json.loads(sql('select invoice_snapshot from invoice_ledger').stdout)
+    assert stored['due_date'] == stored['fulfillment_date'] == due
+
+
+def test_invoice_note_is_checked_against_saved_profile_and_archived():
+    sql("update client_billing_profiles set invoice_note='Approved services & annex'")
+    review = snapshot()
+    assert reserve(review).returncode != 0
+    assert sql('select count(*) from invoice_ledger').stdout.strip() == '0'
+    review['invoice_comment'] += '\nApproved services & annex'
+    assert reserve(review).returncode == 0
+    assert json.loads(sql("select invoice_snapshot->'invoice_comment' from invoice_ledger").stdout) == review['invoice_comment']
+
+
+def test_manual_dates_are_archived_and_do_not_change_approved_time():
+    dates = json.loads(sql("select json_build_object('due',(now() at time zone 'Europe/Budapest')::date+20,'fulfillment',(now() at time zone 'Europe/Budapest')::date-2)").stdout)
+    review = snapshot()
+    review.update(due_date=dates['due'], fulfillment_date=dates['fulfillment'],
+        date_overrides={'due_date': dates['due'], 'fulfillment_date': dates['fulfillment']})
+    assert reserve(review).returncode == 0
+    stored = json.loads(sql('select invoice_snapshot from invoice_ledger').stdout)
+    assert stored['date_overrides'] == review['date_overrides']
+    assert Decimal(sql('select hours_logged from timesheets').stdout.strip()) == Decimal('2.5')
+    assert sql('select status from timesheets').stdout.strip() == 'approved'
+
+
+@pytest.mark.parametrize('policy', ['days_after_issue', 'month_end'])
+def test_backend_generated_dates_and_note_match_database_reservation(policy):
+    from datetime import date
+    from uuid import UUID
+    from app.schemas.invoices import InvoiceDateOverrides, InvoiceReviewProjectLine
+    from app.services.client_invoice_service import ClientInvoiceService
+
+    sql(f"update client_billing_profiles set invoice_note='Approved services & annex', payment_due_policy='{policy}', payment_due_reference='period_end', payment_due_month_offset=2")
+    profile = json.loads(sql('select row_to_json(p) from client_billing_profiles p').stdout)
+    profile['billing_country_code'] = 'HU'
+    review = snapshot()
+    invoice, _ = ClientInvoiceService._build_invoice_request(company_id=UUID(COMPANY), client_id=UUID(CLIENT),
+        period_start=date(2026, 10, 1), period_end=date(2026, 10, 31),
+        profile=profile, client={'client_code': 'TEST'},
+        lines=[InvoiceReviewProjectLine.model_validate(review['items'][0])], preview=False,
+        date_overrides=InvoiceDateOverrides(fulfillment_date=review['issue_date']))
+    review.update(invoice_comment=invoice.comment, due_date=invoice.due_date.isoformat(),
+        fulfillment_date=invoice.fulfillment_date.isoformat(),
+        date_overrides={'fulfillment_date': review['issue_date']})
+    assert reserve(review).returncode == 0
+
+
+@pytest.mark.parametrize('expression', ["repeat('x',451)", "chr(1)", "chr(65534)", "'   '"])
+def test_invalid_invoice_note_cannot_be_saved(expression):
+    assert sql(f'update client_billing_profiles set invoice_note={expression}', check=False).returncode != 0
+
+
+@pytest.mark.parametrize('change', ['past_due', 'far_due', 'far_fulfillment', 'mismatched_due', 'unknown_override', 'invalid_override'])
+def test_date_tampering_never_reserves_work(change):
+    today = sql("select (now() at time zone 'Europe/Budapest')::date").stdout.strip()
+    past = sql("select (now() at time zone 'Europe/Budapest')::date-1").stdout.strip()
+    far = sql("select (now() at time zone 'Europe/Budapest')::date+367").stdout.strip()
+    review = snapshot()
+    if change == 'past_due': review.update(due_date=past, date_overrides={'due_date': past})
+    if change == 'far_due': review.update(due_date=far, date_overrides={'due_date': far})
+    if change == 'far_fulfillment': review.update(fulfillment_date=far, date_overrides={'fulfillment_date': far})
+    if change == 'mismatched_due': review['date_overrides'] = {'due_date': today}
+    if change == 'unknown_override': review['date_overrides'] = {'issue_date': today}
+    if change == 'invalid_override': review['date_overrides'] = {'due_date': 1795132800}
+    assert reserve(review).returncode != 0
+    assert sql('select count(*) from invoice_ledger').stdout.strip() == '0'
+    assert sql('select count(*) from invoice_ledger_entries').stdout.strip() == '0'
+
+
+@pytest.mark.parametrize('identity', [OTHER_ADMIN, WORKER])
+def test_new_terms_do_not_bypass_invoice_admin_or_tenant_access(identity):
+    review = snapshot()
+    review['date_overrides'] = {'fulfillment_date': review['issue_date']}
+    review['fulfillment_date'] = review['issue_date']
+    assert reserve(review, identity=identity).returncode != 0
+    assert sql('select count(*) from invoice_ledger').stdout.strip() == '0'
 
 
 def test_new_reservation_uses_project_rate_and_preserves_reviewed_lines():
