@@ -36,6 +36,13 @@ class ExcelReportService:
             "difference": "Különbözet",
             "task": "Feladat",
             "hours": "Időráfordítás (óra)",
+            "multiplier": "Szorzó",
+            "weighted_hours": "Órák × szorzó",
+            "services": "Teljesített szolgáltatások",
+            "quantity": "Mennyiség",
+            "unit": "Egység",
+            "invoice_statement": "Az elszámolási időszakban teljesített szolgáltatások és a hozzájuk tartozó időráfordítás kimutatása.",
+            "no_entries": "Nincs időbejegyzés. A teljesített szolgáltatásokat az alábbi táblázat tartalmazza.",
         },
         "en": {
             "title": "Invoice attachment (certificate of completion)",
@@ -46,6 +53,13 @@ class ExcelReportService:
             "difference": "Difference",
             "task": "Task description",
             "hours": "Time spent (hours)",
+            "multiplier": "Multiplier",
+            "weighted_hours": "Hours × multiplier",
+            "services": "Services delivered",
+            "quantity": "Quantity",
+            "unit": "Unit",
+            "invoice_statement": "Services delivered during the stated period and their supporting time entries.",
+            "no_entries": "No time entries. Services delivered are listed below.",
         },
     }
     MONTH_NAMES = {
@@ -253,9 +267,9 @@ class ExcelReportService:
         user_jwt: Optional[str] = None,
     ) -> io.BytesIO:
         """
-        Generates a multi-sheet Excel workbook where each client has a dedicated sheet
-        matching the exact layout, granular per-entry listing, formulas, and visual styling
-        of szamlamelleklet_szeptember.xlsx.
+        Generate client sheets using the established certificate template.
+        Monthly exports include balance formulas; invoice snapshots include
+        reviewed service quantities and explicit entry multipliers instead.
         """
 
         wb = Workbook()
@@ -308,6 +322,8 @@ class ExcelReportService:
             safe_title = self._safe_sheet_title(client_code, wb.sheetnames)
             client_name = self._safe_cell_text(report.get("client_name", ""))
             entries = report.get("entries", [])
+            invoice_items = report.get("invoice_items")
+            invoice_mode = invoice_items is not None
             logo_path = report.get("logo_path")
             logo_bytes: bytes | None = None
 
@@ -353,6 +369,16 @@ class ExcelReportService:
             ws.column_dimensions["C"].width = 90.0
             ws.column_dimensions["D"].width = 21.0
             ws.column_dimensions["E"].width = 10.0
+            if invoice_mode:
+                ws.column_dimensions["C"].width = 80.0
+                ws.column_dimensions["D"].width = 20.0
+                ws.column_dimensions["E"].width = 12.0
+                ws.column_dimensions["F"].width = 22.0
+                for row in (8, 10, 11, 12, 13):
+                    ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=6)
+                ws.freeze_panes = "D17"
+                ws.row_dimensions[8].height = 24
+                ws.oddFooter.center.text = "&P / &N"
 
             # Row Heights (exact match)
             ws.row_dimensions[1].height = 45.0
@@ -369,8 +395,8 @@ class ExcelReportService:
                 self._add_logo_to_sheet(ws, resolved_logo_path, "A1")
 
             # Document Metadata Headers (Rows 6-13, Column C)
-            cell_c6 = ws.cell(row=6, column=3, value=client_name)
-            cell_c6.font = font_client_name
+            cell_c6 = ws.cell(row=8 if invoice_mode else 6, column=3, value=client_name)
+            cell_c6.font = Font(name="Calibri", size=12, bold=True) if invoice_mode else font_client_name
             cell_c6.alignment = Alignment(horizontal="left", vertical="center")
             cell_c6.border = client_border
 
@@ -392,7 +418,7 @@ class ExcelReportService:
             cell_c12.font = font_issue_date
             cell_c12.alignment = align_wrap_left
 
-            cell_c13 = ws.cell(row=13, column=3, value=text["statement"])
+            cell_c13 = ws.cell(row=13, column=3, value=text["invoice_statement"] if invoice_mode else text["statement"])
             cell_c13.font = font_body
             cell_c13.alignment = align_wrap_left
 
@@ -404,6 +430,16 @@ class ExcelReportService:
                 hdr.fill = fill_header
                 hdr.alignment = align_center
                 hdr.border = table_border
+            if invoice_mode:
+                for column, label in ((5, "multiplier"), (6, "weighted_hours")):
+                    cell = ws.cell(16, column, text[label])
+                    cell.font = font_header
+                    cell.fill = fill_header
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    cell.border = table_border
+                hdr_d16.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                hdr_c16.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws.row_dimensions[16].height = 30
 
             # Data Rows (Row 17+)
             first_entry_row = 17
@@ -441,6 +477,14 @@ class ExcelReportService:
                 cell_hours.alignment = align_right
                 cell_hours.number_format = "0.00"
                 cell_hours.border = table_border
+                if invoice_mode:
+                    multiplier = entry.get("billing_multiplier", 1)
+                    for column, value in ((5, multiplier), (6, float(raw_hours) * multiplier)):
+                        cell = ws.cell(current_row, column, value)
+                        cell.font = font_body
+                        cell.alignment = align_right
+                        cell.border = table_border
+                        cell.number_format = "0" if column == 5 else "0.00"
 
                 estimated_lines = sum(
                     max(1, math.ceil(len(line) / 90))
@@ -450,6 +494,12 @@ class ExcelReportService:
                     409.0, max(15.0, estimated_lines * 15.0)
                 )
 
+                current_row += 1
+
+            if invoice_mode and not entries:
+                ws.merge_cells(start_row=current_row, start_column=3, end_row=current_row, end_column=6)
+                ws.cell(current_row, 3, text["no_entries"]).alignment = align_wrap_left
+                ws.row_dimensions[current_row].height = 30
                 current_row += 1
 
             last_entry_row = max(first_entry_row, current_row - 1)
@@ -462,74 +512,108 @@ class ExcelReportService:
             cell_total_label.font = font_summary_lbl
             cell_total_label.border = table_border
 
-            sum_formula = (
-                f"=SUM(D{first_entry_row}:D{last_entry_row})" if entries else 0
-            )
+            sum_formula = (sum(float(entry.get("hours", 0)) for entry in entries) if invoice_mode else
+                f"=SUM(D{first_entry_row}:D{last_entry_row})" if entries else 0)
             cell_total_val = ws.cell(row=total_used_row, column=4, value=sum_formula)
             cell_total_val.font = font_summary_val
             cell_total_val.number_format = "0.00"
             cell_total_val.border = table_border
 
+            if invoice_mode:
+                # Issued attachments are immutable review snapshots, with no
+                # live carry-over balances or monthly-closeout side effects.
+                cell = ws.cell(total_used_row, 6, sum(
+                    float(entry.get("hours", 0)) * entry.get("billing_multiplier", 1) for entry in entries))
+                cell.font = font_summary_val
+                cell.number_format = "0.00"
+                cell.border = table_border
+                ws.cell(total_used_row, 5).border = table_border
+                service_header = total_used_row + 3
+                for column, label in ((3, "services"), (4, "quantity"), (5, "unit")):
+                    cell = ws.cell(service_header, column, text[label])
+                    cell.font = font_header
+                    cell.fill = fill_header
+                    cell.border = table_border
+                ws.merge_cells(start_row=service_header, start_column=5, end_row=service_header, end_column=6)
+                for row, item in enumerate(invoice_items, service_header + 1):
+                    description = "\n".join(str(part) for part in (
+                        item["name"], item.get("note"), f"PO: {item['po_number']}" if item.get("po_number") else None) if part)
+                    for column, value in ((3, self._safe_cell_text(description)),
+                                          (4, float(item["quantity"])), (5, self._safe_cell_text(item["unit"]))):
+                        cell = ws.cell(row, column, value)
+                        cell.font = font_body
+                        cell.alignment = align_wrap_left if column == 3 else align_right
+                        cell.border = table_border
+                        if column == 4:
+                            cell.number_format = "0.####"
+                    lines = sum(max(1, math.ceil(len(line) / 80)) for line in description.splitlines())
+                    ws.row_dimensions[row].height = min(409, max(18, lines * 15))
+                    ws.merge_cells(start_row=row, start_column=5, end_row=row, end_column=6)
+                diff_row = service_header + len(invoice_items)
+            else:
+                diff_row = total_used_row + 3
+
             # Contracted Available Hours
-            raw_available = report.get("available_hours_per_month")
-            available_val = (
-                0
-                if raw_available is None
-                else (
-                    int(raw_available)
-                    if float(raw_available).is_integer()
-                    else float(raw_available)
+            if not invoice_mode:
+                raw_available = report.get("available_hours_per_month")
+                available_val = (
+                    0
+                    if raw_available is None
+                    else (
+                        int(raw_available)
+                        if float(raw_available).is_integer()
+                        else float(raw_available)
+                    )
                 )
-            )
-            avail_row = total_used_row + 1
-            cell_avail_lbl = ws.cell(
-                row=avail_row, column=3, value=text["available_hours"]
-            )
-            cell_avail_lbl.font = font_summary_lbl
-            cell_avail_lbl.border = table_border
-
-            cell_avail_val = ws.cell(row=avail_row, column=4, value=available_val)
-            cell_avail_val.font = font_summary_val
-            cell_avail_val.number_format = "0.00"
-            cell_avail_val.border = table_border
-
-            # Older Period Hours
-            raw_prev = report.get("hours_from_previous_month")
-            previous_val = (
-                0
-                if raw_prev is None
-                else (
-                    int(raw_prev) if float(raw_prev).is_integer() else float(raw_prev)
+                avail_row = total_used_row + 1
+                cell_avail_lbl = ws.cell(
+                    row=avail_row, column=3, value=text["available_hours"]
                 )
-            )
-            prev_row = avail_row + 1
-            cell_prev_lbl = ws.cell(
-                row=prev_row, column=3, value=text["previous_hours"]
-            )
-            cell_prev_lbl.font = font_summary_lbl
-            cell_prev_lbl.border = table_border
+                cell_avail_lbl.font = font_summary_lbl
+                cell_avail_lbl.border = table_border
 
-            cell_prev_val = ws.cell(row=prev_row, column=4, value=previous_val)
-            cell_prev_val.font = font_summary_val
-            cell_prev_val.number_format = "0.00"
-            cell_prev_val.border = table_border
+                cell_avail_val = ws.cell(row=avail_row, column=4, value=available_val)
+                cell_avail_val.font = font_summary_val
+                cell_avail_val.number_format = "0.00"
+                cell_avail_val.border = table_border
 
-            # Difference Formula Row
-            diff_row = prev_row + 1
-            cell_diff_lbl = ws.cell(row=diff_row, column=3, value=text["difference"])
-            cell_diff_lbl.font = font_summary_lbl
-            cell_diff_lbl.border = table_border
+                # Older Period Hours
+                raw_prev = report.get("hours_from_previous_month")
+                previous_val = (
+                    0
+                    if raw_prev is None
+                    else (
+                        int(raw_prev) if float(raw_prev).is_integer() else float(raw_prev)
+                    )
+                )
+                prev_row = avail_row + 1
+                cell_prev_lbl = ws.cell(
+                    row=prev_row, column=3, value=text["previous_hours"]
+                )
+                cell_prev_lbl.font = font_summary_lbl
+                cell_prev_lbl.border = table_border
 
-            diff_formula = f"=D{avail_row}-D{total_used_row}+D{prev_row}"
-            cell_diff_val = ws.cell(row=diff_row, column=4, value=diff_formula)
-            cell_diff_val.font = font_summary_val
-            cell_diff_val.number_format = "0.00"
-            cell_diff_val.border = table_border
+                cell_prev_val = ws.cell(row=prev_row, column=4, value=previous_val)
+                cell_prev_val.font = font_summary_val
+                cell_prev_val.number_format = "0.00"
+                cell_prev_val.border = table_border
+
+                # Difference Formula Row
+                diff_row = prev_row + 1
+                cell_diff_lbl = ws.cell(row=diff_row, column=3, value=text["difference"])
+                cell_diff_lbl.font = font_summary_lbl
+                cell_diff_lbl.border = table_border
+
+                diff_formula = f"=D{avail_row}-D{total_used_row}+D{prev_row}"
+                cell_diff_val = ws.cell(row=diff_row, column=4, value=diff_formula)
+                cell_diff_val.font = font_summary_val
+                cell_diff_val.number_format = "0.00"
+                cell_diff_val.border = table_border
 
             # Keep each attachment printable at one page wide while allowing long
             # entry lists to continue vertically with their table header repeated.
             ws.sheet_view.showGridLines = False
-            ws.print_area = f"A1:E{diff_row}"
+            ws.print_area = f"A1:{'F' if invoice_mode else 'E'}{diff_row}"
             ws.print_title_rows = "16:16"
             ws.page_setup.orientation = "landscape"
             ws.page_setup.paperSize = ws.PAPERSIZE_A4

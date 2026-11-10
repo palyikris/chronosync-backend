@@ -53,6 +53,17 @@ def test_nonretryable_database_business_conflicts_return_http_409(operation):
     assert raised.value.status_code == 409
 
 
+@pytest.fixture(autouse=True)
+def reviewed_attachment_transport():
+    # Provider outcome tests isolate attachment transport; real generation,
+    # metadata verification and storage ordering are covered in test_invoice_annex.
+    from app.services.invoice_providers.base import InvoiceEmailAttachment
+    attachment = InvoiceEmailAttachment(filename="invoice-attachment-test.xlsx", content=b"PK\x03\x04reviewed")
+    with patch.object(ClientInvoiceService, "_build_reviewed_attachment", AsyncMock(return_value=attachment)), \
+         patch.object(ClientInvoiceService, "_store_invoice_attachment", AsyncMock()):
+        yield
+
+
 def invoice_request() -> InvoiceCreateRequest:
     return InvoiceCreateRequest.model_validate(
         {

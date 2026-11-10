@@ -1,110 +1,67 @@
-# Invoice annex generation and delivery
+# Invoice attachment generation and delivery
 
-Implemented on 4 November 2026 and verified through the deployed staging invoice
-and storno flow on 5 November. Email receipt remains pending. See the
-[staging verification report](invoice-lifecycle-staging-2026-11-05.md) for the
-current release state and actual provider evidence.
+Every new invoice uses the existing invoice attachment (certificate of completion)
+template. The separate two-sheet billing report and its opt-out setting have been
+removed. The `attach_timesheet_report` wire field remains for compatibility with
+older clients and ledger snapshots; new reviews always set it to true.
 
-## Behavior
+## Contents
 
-The saved **Save billing report and attach it to invoice emails** preference now
-controls a per-invoice XLSX workbook. It contains the reviewed project charges,
-quantities, unit prices, VAT, totals, notes and PO references, followed by the
-reviewed time entries with their individual billing multipliers. Fixed monthly
-and other quantity-based charges have a meaningful report even without time.
-Labels follow the client's Hungarian/English attachment language; configured
-service names and source descriptions retain their saved text.
+The shared `ExcelReportService` template produces one client sheet in Hungarian
+or English, with the existing branding, service period and issue date. Issued
+attachments show the reviewed time entries with their dates, service names,
+logged hours, billing multipliers and multiplied hours. A service table includes
+reviewed quantities, units, notes and PO references, including fixed-fee invoices
+without time entries. Prices and VAT remain on the invoice.
 
-Invoice review shows the filename, size and delivery choice. **Review billing
-report** downloads the exact current reviewed workbook after checking the review
-fingerprint. The batch confirmation shows the corresponding client's report and
-email choice in its billing details.
+The ordinary monthly attachment export retains its contracted-hours and carry-over
+calculations. The issued attachment uses the reviewed invoice snapshot only;
+it does not fetch current balances, change carry-over or finalize a month.
 
-Email-enabled invoices upload that client's workbook alongside the XML using
-`attachfile1`. When email is disabled, the workbook is saved for download without
-requesting notification or uploading an attachment the provider would ignore.
-Turning the report preference off omits report generation, upload and storage.
+## Review, delivery and archive
 
-Each report is generated exclusively from one invoice review. It does not fetch
-additional clients, later time entries, current carry-over balances or changed
-pricing. This per-invoice breakdown records the charges actually being issued;
-the separate monthly attachment export continues to handle its own carry-over
-finalization flow.
+The attachment is generated for every review, checked against the provider's
+2,000,000-byte attachment limit, and included in the review fingerprint through
+its filename, language, size and SHA-256 digest. Workbook and ZIP timestamps are
+normalized, so review download and issuance reproduce identical bytes. Changed
+entries, language or template output require another review.
 
-## Review, storage and failures
+The attachment is stored after reservation and before contacting the provider.
+The database verifies size, ZIP signature and digest. A storage failure prevents
+the provider call, and invoice finalization requires the stored reviewed bytes.
+When invoice email delivery is enabled, the same workbook is uploaded using the
+existing `attachfile1` transport. Otherwise it remains saved for download.
 
-XLSX ZIP timestamps and workbook modification metadata are normalized, so the same
-review produces the same bytes and SHA-256 digest. The report's name, language,
-size and digest are part of the review fingerprint. Changed data, preferences,
-language or generator output requires another review before issuance.
+Invoice review offers **Review invoice attachment**. Invoice history offers
+**Download invoice attachment**, which returns the stored bytes after checking
+their digest. Historical reports, including those on reversed invoices, are
+preserved exactly as issued. They are never regenerated from current data.
 
-The report is generated and checked against the conservative 2,000,000-byte
-provider limit before reservation. Oversized reports make that client ineligible
-in batch preflight; other eligible clients can continue after confirmation.
-Workbook cells escape formula-leading text, and text exceeding Excel's cell limit
-blocks the report rather than silently truncating it.
+## Deployment
 
-After reservation and before any provider creation call, an authenticated RPC
-stores the bytes. PostgreSQL independently verifies the size, ZIP signature and
-digest against the reviewed metadata. A failed or unconfirmed storage result
-prevents the provider call. Finalization also requires the stored report when the
-review requested it. The storage RPC is tenant-admin scoped, unavailable to
-anonymous callers, idempotent for the same bytes and closed after issuance.
+Apply `supabase/migrations/20261110151118_require_invoice_attachment.sql` and
+deploy the compatible backend and frontend together. The migration makes
+attachments mandatory for new reservations and safe retries even when the old
+saved report preference is false. It retains tenant/admin authorization, storage
+checks and the existing behavior of already reserved or issued ledger records.
+Old reviews without attachment metadata must be refreshed before a new issuance.
+No saved historical files or recipient email preferences are changed.
 
-Once the provider call starts, unknown outcomes keep the normal uncertain ledger
-state and reservations. The stored report survives timeouts and reconciliation;
-the application never resends an invoice to recover its report.
+## Verification
 
-**Download billing report** in invoice history serves the stored bytes, checks
-their digest and never regenerates from current client data. The original report
-remains available after storno alongside the original and reversal PDFs. A safely
-failed issuance can replace its report only during a fresh reserved attempt.
+Regression tests cover localized deterministic template output, service quantities
+without time entries, multiplier reconciliation, formula safety, size limits,
+mandatory attachments regardless of the old preference, review fingerprints,
+storage-before-provider ordering, email-disabled storage, actual multipart bytes,
+provider uncertainty, and unchanged archive downloads after storno.
 
-## Release
+Disposable PostgreSQL checks verify mandatory metadata and saved bytes, legacy
+preferences, language and digest validation, authorization, retry behavior and
+archive preservation. Browser checks exercise the removed toggle, profile saving,
+review downloads and archived attachment downloads. English and Hungarian print
+layouts are rendered with LibreOffice and visually inspected.
 
-For a new installation, apply `supabase/migrations/20261104204746_invoice_annex_delivery.sql`
-after the recurring-configuration and storno migrations. Deploy the compatible
-backend and frontend together while production remains in preview mode. The
-migration adds private report storage and a generated availability flag to the
-existing RLS-protected ledger, a reservation/finalization trigger and an explicit
-admin storage RPC. It does not change saved recipient data, pricing, email
-preferences, report preferences or production issuance gates.
-
-Older ledger records have no annex metadata and keep their historical behavior.
-Old reviews that omit the report when its saved preference is enabled are rejected
-and require a fresh review with the compatible app.
-
-## Verification and limits
-
-Tests cover deterministic valid XLSX generation, Hungarian/English labels,
-price/VAT totals, payroll multipliers, zero-time monthly fees, formula injection,
-size limits, preference/language fingerprint changes, saving before provider
-calls, disabled email, exact multipart bytes, storage failure, provider timeout,
-read-only review/archive downloads, and oversized-client batch skips.
-
-Disposable PostgreSQL tests cover required storage before finalization, metadata
-and byte mismatches, tenant/employee/anonymous restrictions, retry resets,
-uncertain-state retention and report preservation through storno. Supabase
-security advisors found no annex/ledger issues; their four findings are the
-minimal fixture's unrelated tables without production RLS definitions.
-
-Browser checks cover saving both preference states, reviewing and downloading a
-report, rejecting an invalid download, and archived report downloads after storno
-in English and mobile Hungarian. Representative two-sheet reports were exported
-with LibreOffice and their printed layout inspected in both languages.
-
-The final combined backend/database run passed 398 tests, with 96 tests requiring
-other integration environments skipped. The frontend production build,
-full ESLint, 77 frontend unit tests and both manual/batch browser suites
-passed. Sample workbook renders are in `/tmp/chronosync-annex-qa/` for this session.
-
-Provider transport simulations use the actual HTTP client. The deployed staging
-flow subsequently issued an electronic invoice with the workbook upload and
-verified its archived bytes through storno. Actual email receipt remains pending.
-The provider documents that invalid attachments can be omitted while the invoice
-notification still sends, so a successful invoice response is not a delivery
-receipt. Confirm attachment presence in an authorized staging email before
-production rollout; never reissue an invoice to repair missing email delivery.
-
-Provider contract:
-https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/email-notification
+These local checks do not establish a new live provider transaction or email
+receipt. A provider success response is not an email-delivery receipt. The provider
+contract is documented at
+https://docs.szamlazz.hu/agent/generating_invoice/settings_and_rules/email-notification.

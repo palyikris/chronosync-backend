@@ -734,6 +734,36 @@ def annex_reservation(*, identity=ADMIN, language='hu'):
     return result,review,base64.b64encode(content).decode()
 
 
+@pytest.fixture
+def mandatory_attachment():
+    sql((ROOT/'supabase/migrations/20261110151118_require_invoice_attachment.sql').read_text())
+    try:
+        yield
+    finally:
+        original = (ROOT/'supabase/migrations/20261104204746_invoice_annex_delivery.sql').read_text()
+        sql(original[original.index('create or replace function private.guard_invoice_attachment()'):
+                     original.index('create trigger guard_invoice_attachment')])
+        sql('alter table client_billing_profiles alter column attach_timesheet_report set default false')
+
+
+@pytest.mark.parametrize('saved_preference', [True, False])
+def test_standard_attachment_is_required_even_when_old_preference_was_disabled(mandatory_attachment, saved_preference):
+    result, review, encoded = annex_reservation()
+    invoice_id = result.stdout.strip()
+    sql(f"select mark_manual_invoice_attempt('{invoice_id}','failed','test','Preparation stopped')", ADMIN)
+    sql(f'update client_billing_profiles set attach_timesheet_report={str(saved_preference).lower()}')
+    missing = {**review, 'attach_timesheet_report': False, 'attachment': None}
+    assert reserve(missing).returncode != 0
+    assert reserve({**review, 'attachment': None}).returncode != 0
+    assert reserve(review).returncode == 0
+    final = f"select * from finalize_manual_invoice('{invoice_id}','TEST-STANDARD',250,250,'JVBERi1saXZl')"
+    assert sql(final, ADMIN, check=False).returncode != 0
+    sql(f"select * from store_invoice_attachment('{invoice_id}','{encoded}')", ADMIN)
+    sql(final, ADMIN)
+    assert sql('select attachment_available from invoice_ledger').stdout.strip() == 't'
+    assert sql("select has_function_privilege('anon','private.guard_invoice_attachment()','execute')").stdout.strip() == 'f'
+
+
 def test_required_annex_must_be_stored_before_invoice_can_finalize():
     result,review,encoded=annex_reservation()
     assert result.returncode==0,result.stderr

@@ -215,6 +215,7 @@ def test_issue_flow_runs_real_xml_transport_and_parser_without_replaying(scenari
     import base64
     from unittest.mock import AsyncMock, patch
 
+    from app.services.invoice_annex_service import InvoiceAnnexService
     from app.services.company_service import CompanyCredentialService
     from test_manual_invoice_issue import (
         CLIENT_ID, COMPANY_ID, INVOICE_ID, fake_agent_key,
@@ -227,6 +228,8 @@ def test_issue_flow_runs_real_xml_transport_and_parser_without_replaying(scenari
     def handler(request):
         requests.append(request)
         assert b"action-xmlagentxmlfile" in request.content
+        assert b'name="attachfile1"' in request.content
+        assert attachment.content in request.content
         assert b"<elonezetpdf>false</elonezetpdf>" in request.content
         assert f"chronosync-{INVOICE_ID}".encode() in request.content
         if scenario == "timeout":
@@ -245,11 +248,14 @@ def test_issue_flow_runs_real_xml_transport_and_parser_without_replaying(scenari
     finalize = AsyncMock()
     mark_attempt = AsyncMock()
     review = invoice_review()
+    attachment = InvoiceAnnexService._build(review, 'hu')
+    review.attachment = InvoiceAnnexService.metadata(attachment, language='hu')
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     with (
         patch.object(ClientInvoiceService, "_build_review_context", AsyncMock(return_value=(review, invoice_request()))),
         patch.object(ClientInvoiceService, "_assert_live_invoice_mode", AsyncMock()),
         patch.object(ClientInvoiceService, "_reserve_invoice", AsyncMock(return_value=INVOICE_ID)),
+        patch.object(ClientInvoiceService, "_store_invoice_attachment", AsyncMock()),
         patch.object(CompanyCredentialService, "decrypted_szamlazz_agent_key", fake_agent_key),
         patch("app.services.invoice_providers.szamlazz_hu.httpx.AsyncClient", return_value=client),
         patch.object(ClientInvoiceService, "_finalize_invoice", finalize),

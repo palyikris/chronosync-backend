@@ -191,7 +191,7 @@ class ClientInvoiceService:
                 "seller_bank_name": invoice.seller_bank_name,
                 "seller_bank_account": invoice.seller_bank_account,
                 "invoice_comment": invoice.comment,
-                "attach_timesheet_report": profile.get("attach_timesheet_report") is True,
+                "attach_timesheet_report": True,
                 "billing_profile_updated_at": profile.get("updated_at"),
                 "net_total": net_total,
                 "vat_total": vat_total,
@@ -204,11 +204,10 @@ class ClientInvoiceService:
                     if line.logged_hours is None
                 },
             }
-            if review_data["attach_timesheet_report"]:
-                draft = ClientInvoiceReview(**review_data, review_fingerprint="")
-                language = str(client.get("invoice_attachment_language") or "hu")
-                attachment = await InvoiceAnnexService.build(draft, language=language)
-                review_data["attachment"] = InvoiceAnnexService.metadata(attachment, language=language)
+            draft = ClientInvoiceReview(**review_data, review_fingerprint="")
+            language = str(client.get("invoice_attachment_language") or "hu")
+            attachment = await InvoiceAnnexService.build(draft, language=language)
+            review_data["attachment"] = InvoiceAnnexService.metadata(attachment, language=language)
             review = ClientInvoiceReview(
                 **review_data,
                 review_fingerprint=cls._review_fingerprint(review_data),
@@ -503,16 +502,12 @@ class ClientInvoiceService:
             await SupabaseDataService._close_authenticated_client(supabase)
 
     @classmethod
-    async def _build_reviewed_attachment(cls, review: ClientInvoiceReview) -> InvoiceEmailAttachment | None:
-        if not review.attach_timesheet_report:
-            if review.attachment:
-                raise HTTPException(409, "Unexpected billing report in the invoice review.")
-            return None
+    async def _build_reviewed_attachment(cls, review: ClientInvoiceReview) -> InvoiceEmailAttachment:
         if not review.attachment:
-            raise HTTPException(409, "A required billing report is missing. Review the invoice again.")
+            raise HTTPException(409, "A required invoice attachment is missing. Review the invoice again.")
         attachment = await InvoiceAnnexService.build(review, language=review.attachment.language)
         if InvoiceAnnexService.metadata(attachment, language=review.attachment.language) != review.attachment:
-            raise HTTPException(409, "The billing report changed after review. Review the invoice again.")
+            raise HTTPException(409, "The invoice attachment changed after review. Review the invoice again.")
         return attachment
 
     @classmethod
@@ -529,14 +524,14 @@ class ClientInvoiceService:
                 if not (isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict)
                         and str(rows[0].get("invoice_id")) == str(invoice_id)
                         and rows[0].get("sha256") == hashlib.sha256(attachment.content).hexdigest()):
-                    raise HTTPException(502, "The billing report could not be saved. No invoice was sent to the provider.")
+                    raise HTTPException(502, "The invoice attachment could not be saved. No invoice was sent to the provider.")
             except APIError as exc:
                 raise HTTPException(403 if exc.code == "42501" else 409 if exc.code == "PT409" else 502,
-                    "The billing report could not be saved. No invoice was sent to the provider.") from None
+                    "The invoice attachment could not be saved. No invoice was sent to the provider.") from None
             except HTTPException:
                 raise
             except Exception:
-                raise HTTPException(502, "The billing report could not be saved. No invoice was sent to the provider.") from None
+                raise HTTPException(502, "The invoice attachment could not be saved. No invoice was sent to the provider.") from None
         finally:
             await SupabaseDataService._close_authenticated_client(client)
 
@@ -549,11 +544,8 @@ class ClientInvoiceService:
             client_id=client_id, period_start=period_start, period_end=period_end,
             project_quantities=project_quantities, date_overrides=date_overrides)
         if review.review_fingerprint != review_fingerprint:
-            raise HTTPException(409, "The invoice changed after review. Refresh before downloading its report.")
-        attachment = await cls._build_reviewed_attachment(review)
-        if not attachment:
-            raise HTTPException(404, "This invoice review does not include a billing report.")
-        return attachment
+            raise HTTPException(409, "The invoice changed after review. Refresh before downloading its attachment.")
+        return await cls._build_reviewed_attachment(review)
 
     @classmethod
     async def get_invoice_attachment(cls, *, user_jwt: str, company_id: UUID,
@@ -561,7 +553,7 @@ class ClientInvoiceService:
         current = await cls.get_invoice_history_item(user_jwt=user_jwt,
             company_id=company_id, invoice_id=invoice_id)
         if not current.attachment_available or not current.attachment:
-            raise HTTPException(404, "The stored invoice report was not found.")
+            raise HTTPException(404, "The stored invoice attachment was not found.")
         client = await SupabaseDataService.get_authenticated_client(user_jwt)
         try:
             response = await client.table("invoice_ledger").select("attachment_bytes").eq(
@@ -570,7 +562,7 @@ class ClientInvoiceService:
             content = cls._decode_bytea(rows[0].get("attachment_bytes")) if isinstance(rows, list) and rows else None
             if (not content or len(content) != current.attachment.size_bytes
                     or hashlib.sha256(content).hexdigest() != current.attachment.sha256):
-                raise HTTPException(502, "The stored invoice report failed its integrity check.")
+                raise HTTPException(502, "The stored invoice attachment failed its integrity check.")
             return InvoiceEmailAttachment(filename=current.attachment.filename, content=content)
         finally:
             await SupabaseDataService._close_authenticated_client(client)

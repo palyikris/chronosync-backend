@@ -349,7 +349,7 @@ class ClientInvoiceReview(BaseModel):
     seller_bank_name: str | None = None
     seller_bank_account: str | None = None
     invoice_comment: str | None = None
-    attach_timesheet_report: bool = False
+    attach_timesheet_report: bool = True
     attachment: InvoiceAttachmentInfo | None = None
     billing_profile_updated_at: datetime | None = None
     net_total: Decimal

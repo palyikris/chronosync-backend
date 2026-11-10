@@ -53,17 +53,20 @@ def test_annex_workbook_is_deterministic_localized_and_matches_review(language):
     assert len(attachment.content)<2_000_000
     assert hashlib.sha256(attachment.content).hexdigest()==review.attachment.sha256
     wb=load_workbook(io.BytesIO(attachment.content),data_only=True)
-    billing,times=wb.worksheets
-    assert billing.title==Annex.TEXT[language]['billing']
-    assert billing['A9'].value=='Advisory services'
-    assert Decimal(str(billing['F9'].value))==review.items[0].net_total
-    assert Decimal(str(billing['H10'].value))==review.gross_total
-    assert billing['I9'].value=='Reviewed work\nPO: PO-42'
-    assert times['C6'].value=="'=DO_NOT_EXECUTE()"
-    assert times['C6'].data_type=='s'
-    assert times['F6'].value==2.5
-    assert billing.freeze_panes=='A9' and times.freeze_panes=='A6'
-    assert billing.page_setup.fitToWidth==1
+    assert len(wb.worksheets) == 1
+    sheet = wb.active
+    from app.services.excel_service import ExcelReportService
+    assert sheet['C10'].value == ExcelReportService.TEXTS[language]['title']
+    assert sheet['C22'].value == 'Advisory services\nReviewed work\nPO: PO-42'
+    assert Decimal(str(sheet['D22'].value)) == review.items[0].quantity
+    assert sheet['C17'].value.endswith('=DO_NOT_EXECUTE()')
+    assert sheet['C17'].data_type == 's'
+    assert sheet['F17'].value == 2.5
+    assert sheet['D18'].value == sheet['F18'].value == 2.5
+    assert sheet.freeze_panes == 'D17'
+    assert sheet.page_setup.fitToWidth == 1
+    assert attachment.filename.startswith('invoice-attachment-')
+    assert not any('Billing breakdown' in str(cell.value) for row in sheet for cell in row)
 
 
 def test_quantity_based_invoice_without_entries_still_has_a_meaningful_annex():
@@ -72,8 +75,9 @@ def test_quantity_based_invoice_without_entries_still_has_a_meaningful_annex():
     review.items=[item]
     attachment=asyncio.run(Annex.build(review,language='en'))
     wb=load_workbook(io.BytesIO(attachment.content),data_only=True)
-    assert wb.worksheets[0]['B9'].value==1
-    assert wb.worksheets[1]['A6'].value==Annex.TEXT['en']['empty']
+    assert wb.active['D22'].value == 1
+    assert wb.active['E22'].value == 'hó'
+    assert wb.active['C17'].value.startswith('No time entries.')
 
 
 def test_report_byte_limit_blocks_before_invoice_issuance():
@@ -89,7 +93,22 @@ def test_report_does_not_silently_truncate_long_source_text():
     with pytest.raises(HTTPException): asyncio.run(Annex.build(review,language='en'))
 
 
-def test_attachment_preferences_and_language_are_part_of_actual_review_fingerprint():
+def test_missing_attachment_blocks_issuance_before_reservation_or_provider():
+    review = sample_review().model_copy(update={'attach_timesheet_report': False, 'attachment': None})
+    with patch.object(Invoices, '_build_review_context', AsyncMock(return_value=(review, invoice_request()))), \
+         patch.object(Invoices, '_assert_live_invoice_mode', AsyncMock()), \
+         patch.object(Invoices, '_reserve_invoice', AsyncMock()) as reserve, \
+         patch.object(Provider, 'create_invoice', AsyncMock()) as provider:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(Invoices.issue_client_invoice(user_jwt='test', company_id=COMPANY_ID,
+                client_id=CLIENT_ID, period_start=review.period_start, period_end=review.period_end,
+                review_fingerprint=review.review_fingerprint))
+        assert error.value.status_code == 409
+        reserve.assert_not_awaited()
+        provider.assert_not_awaited()
+
+
+def test_attachment_is_always_included_and_language_is_fingerprinted():
     db=Database()
     profile=db.tables['client_billing_profiles'][0]
     profile['attach_timesheet_report']=True
@@ -106,11 +125,14 @@ def test_attachment_preferences_and_language_are_part_of_actual_review_fingerpri
         assert first.review_fingerprint==repeated.review_fingerprint
         assert first.attachment.language=='en'
         db.tables['clients'][0]['invoice_attachment_language']='hu'
-        assert asyncio.run(review()).review_fingerprint!=first.review_fingerprint
+        hungarian = asyncio.run(review())
+        assert hungarian.review_fingerprint != first.review_fingerprint
         profile['attach_timesheet_report']=False
         disabled=asyncio.run(review())
-        assert disabled.attachment is None
-        assert disabled.review_fingerprint!=first.review_fingerprint
+        assert disabled.attachment is not None
+        assert disabled.attach_timesheet_report is True
+        assert disabled.attachment == hungarian.attachment
+        assert disabled.review_fingerprint == hungarian.review_fingerprint
 
 
 def test_saved_quantity_review_survives_browser_number_roundtrip():
@@ -280,5 +302,6 @@ def test_payroll_line_and_entry_multiplier_reconcile_in_report():
     review.net_total=Decimal(75000);review.vat_total=Decimal(20250);review.gross_total=Decimal(95250)
     attachment=asyncio.run(Annex.build(review,language='en'))
     wb=load_workbook(io.BytesIO(attachment.content),data_only=True)
-    assert wb.worksheets[0]['B9'].value==wb.worksheets[1]['F6'].value==7.5
-    assert wb.worksheets[0]['H10'].value==95250
+    assert wb.active['D22'].value == wb.active['F17'].value == 7.5
+    assert wb.active['D17'].value == 2.5
+    assert wb.active['E17'].value == 3
