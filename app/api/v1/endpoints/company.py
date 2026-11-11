@@ -1,17 +1,45 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from postgrest.exceptions import APIError
 
 from app.api.v1.endpoints.reports import extract_bearer_token
+from app.core.config import settings as server_settings
 from app.schemas.company import (
     InvoiceConnectionTestResponse,
     InvoiceProviderConfigRequest,
     InvoiceProviderConfigResponse,
     SzamlazzKeyRequest,
 )
+from app.schemas.email import EmailStatusResponse
 from app.services.company_service import CompanyCredentialService
+from app.services.email_service import (
+    email_configured, email_missing_variables, invoice_email_transport,
+)
+from app.services.supabase_service import SupabaseDataService
 
 router = APIRouter()
+
+
+@router.get("/email-status", response_model=EmailStatusResponse)
+async def get_email_status(
+    company_id: UUID, token: str = Depends(extract_bearer_token),
+) -> EmailStatusResponse:
+    client = await SupabaseDataService.get_authenticated_client(token)
+    try:
+        try:
+            response = await client.rpc("get_company_email_status", {"p_company_id": str(company_id)}).execute()
+        except APIError as exc:
+            if exc.code == "42501":
+                raise HTTPException(403, "Active company administrator access required.") from None
+            raise HTTPException(503, "Email status is unavailable. Check the email migration.") from None
+        return EmailStatusResponse(
+            configured=email_configured(), worker_enabled=server_settings.EMAIL_WORKER_ENABLED,
+            invoice_transport=invoice_email_transport(), missing_env=email_missing_variables(),
+            **response.data,
+        )
+    finally:
+        await SupabaseDataService._close_authenticated_client(client)
 
 
 @router.get(

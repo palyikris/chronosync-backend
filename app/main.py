@@ -1,9 +1,23 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.services.email_service import EmailWorker
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    worker = EmailWorker()
+    await worker.start()
+    try:
+        yield
+    finally:
+        await worker.stop()
 
 app = FastAPI(
+    lifespan=lifespan,
     title="ChronoSync API",
     description="Backend services for ChronoSync SaaS platform",
     version="1.0.0",

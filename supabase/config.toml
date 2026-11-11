@@ -238,12 +238,14 @@ otp_expiry = 3600
 # Use a production-ready SMTP server
 # [auth.email.smtp]
 # enabled = true
-# host = "smtp.sendgrid.net"
-# port = 587
-# user = "apikey"
-# pass = "env(SENDGRID_API_KEY)"
-# admin_email = "admin@email.com"
-# sender_name = "Admin"
+# host = "smtp.resend.com"
+# port = 465
+# user = "resend"
+# pass = "env(RESEND_API_KEY)"
+# admin_email = "notifications@updates.example.com" # Address from EMAIL_FROM
+# sender_name = "ChronoSync"
+# Leave commented for local mail capture. Hosted SMTP is configured separately;
+# see docs/email-setup.md. Disable click/open tracking on the Resend domain.
 
 [auth.email.template.invite]
 subject = "ChronoSync — meghívás / invitation"

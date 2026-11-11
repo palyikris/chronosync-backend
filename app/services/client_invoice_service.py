@@ -35,6 +35,7 @@ from app.services.invoice_providers.szamlazz_hu import (
     SzamlazzHuRejectedError,
 )
 from app.services.supabase_service import SupabaseDataService
+from app.services.email_service import invoice_email_transport, require_email_ready
 from app.services.project_invoice_pricing import build_project_lines
 
 
@@ -164,6 +165,7 @@ class ClientInvoiceService:
                 group_tax_number=invoice.customer.group_tax_number,
             )
             review_data = {
+                "email_transport": invoice_email_transport(),
                 "company_id": company_id,
                 "client_id": client_id,
                 "client_code": client_code,
@@ -253,6 +255,8 @@ class ClientInvoiceService:
         )
 
         attachment = await cls._build_reviewed_attachment(review)
+        if review.recipient.send_email and review.email_transport == "resend":
+            require_email_ready()
         invoice_id = await cls._reserve_invoice(user_jwt=user_jwt, review=review)
         live_invoice = invoice.model_copy(
             update={
@@ -260,6 +264,9 @@ class ClientInvoiceService:
                 "download_pdf": True,
                 "external_id": f"chronosync-{invoice_id}",
                 "order_number": f"chronosync-{invoice_id}",
+                "customer": invoice.customer.model_copy(update={
+                    "send_email": review.recipient.send_email and review.email_transport == "provider",
+                }),
             }
         )
         provider_started = False
@@ -272,7 +279,7 @@ class ClientInvoiceService:
             ) as api_key:
                 provider_started = True
                 provider = SzamlazzHuProvider(api_key)
-                if attachment and review.recipient.send_email:
+                if attachment and review.recipient.send_email and review.email_transport == "provider":
                     provider_result = await provider.create_invoice(live_invoice.model_dump(), attachments=[attachment])
                 else:
                     provider_result = await provider.create_invoice(live_invoice.model_dump())

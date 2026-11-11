@@ -149,6 +149,12 @@ your deployment secret manager); do not print it into build logs or commit it.
 The invoice-settings API intentionally fails closed when the key is missing or
 invalid.
 
+For leave-request/decision notifications, timesheet rejection emails and invoice
+delivery through Resend with Cloudflare DNS/reply routing, see [Email setup](docs/email-setup.md). Only
+`RESEND_API_KEY` and `EMAIL_FROM` are new required backend values; the existing
+server-only Supabase key is reused. The guide includes the queue migration,
+hosted Auth SMTP settings, optional reply address and read-only readiness checks.
+
 ## Installation
 
 It is recommended to use a virtual environment for local development.

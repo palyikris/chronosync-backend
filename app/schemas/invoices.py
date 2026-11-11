@@ -324,6 +324,7 @@ class InvoiceAttachmentInfo(BaseModel):
 
 
 class ClientInvoiceReview(BaseModel):
+    email_transport: Literal["provider", "resend"] = "provider"
     date_overrides: InvoiceDateOverrides = Field(default_factory=InvoiceDateOverrides)
     company_id: UUID
     client_id: UUID
