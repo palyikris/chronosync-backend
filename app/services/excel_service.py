@@ -26,6 +26,7 @@ class ExcelReportService:
     )
     MAX_LOGO_PIXELS = 20_000_000
     MAX_NORMALIZED_LOGO_SIZE = (1448, 294)
+    MAX_DISPLAY_LOGO_SIZE = (240, 60)
     TEXTS = {
         "hu": {
             "title": "Számlamelléklet (teljesítési igazolás)",
@@ -124,7 +125,7 @@ class ExcelReportService:
     def _add_logo_to_sheet(
         ws, logo_path: Optional[str], cell_anchor: str = "A1"
     ) -> None:
-        """Adds company logo at the designated anchor cell matching reference dimensions."""
+        """Add a compact company logo at the designated anchor cell."""
         if not logo_path or not os.path.exists(logo_path):
             logger.warning("No logo path available for sheet %s", ws.title)
             return
@@ -178,9 +179,9 @@ class ExcelReportService:
             logger.warning("Ignoring invalid company logo: %s", exc)
             return None
 
-    @staticmethod
+    @classmethod
     def _add_normalized_logo_to_sheet(
-        ws, normalized_logo_bytes: bytes | None, cell_anchor: str = "A1"
+        cls, ws, normalized_logo_bytes: bytes | None, cell_anchor: str = "A1"
     ) -> None:
         if not normalized_logo_bytes:
             return
@@ -188,8 +189,10 @@ class ExcelReportService:
         try:
             image_bytes = io.BytesIO(normalized_logo_bytes)
             img = Image(image_bytes)
-            img.width = 724
-            img.height = 147
+            max_width, max_height = cls.MAX_DISPLAY_LOGO_SIZE
+            scale = min(max_width / img.width, max_height / img.height)
+            img.width *= scale
+            img.height *= scale
             ws.add_image(img, cell_anchor)
         except Exception as exc:
             logger.warning("Ignoring invalid logo for sheet %s: %s", ws.title, exc)
