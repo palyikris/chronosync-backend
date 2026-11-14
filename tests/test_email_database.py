@@ -78,6 +78,7 @@ def schema():
     """)
     sql((ROOT / 'supabase/migrations/20261110202649_transactional_email_outbox.sql').read_text())
     sql((ROOT / 'supabase/migrations/20261110213624_employee_decision_emails.sql').read_text())
+    sql((ROOT / 'supabase/migrations/20261113151433_enqueue_multiple_invoice_recipients.sql').read_text())
 
 
 @pytest.fixture(autouse=True)
@@ -183,6 +184,21 @@ def test_invoice_queue_waits_for_confirmed_archived_bytes_and_is_idempotent():
     job = claim()
     assert job['kind'] == 'invoice_issued' and job['event_data']['pdf_base64'] == 'JVBERi1pc3N1ZWQ='
     assert sql('select count(*) from private.transactional_emails').stdout.strip() == '1'
+
+
+def test_multi_recipient_invoice_and_reversal_queue_one_job_per_address():
+    create_invoice()
+    sql("update invoice_ledger set recipient_email='Buyer@example.test, team@example.test,BUYER@example.test'")
+    finalize_invoice()
+    finalize_invoice()
+    assert sql("select recipient from private.transactional_emails order by event_key").stdout.splitlines() == [
+        'buyer@example.test', 'team@example.test',
+    ]
+    for _ in range(2):
+        sql("update invoice_ledger set status='reversed',reversal_pdf_bytes=convert_to('%PDF-storno','UTF8')")
+    assert claim()['kind'] == 'invoice_reversed'
+    assert sql("select count(*) from private.transactional_emails where status='cancelled'").stdout.strip() == '2'
+    assert sql("select count(*) from private.transactional_emails where kind='invoice_reversed'").stdout.strip() == '2'
 
 
 @pytest.mark.parametrize('transport,sending', [('provider', True), ('resend', False)])

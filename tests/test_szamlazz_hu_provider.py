@@ -447,12 +447,15 @@ def test_generated_request_validates_against_downloaded_official_xsd(currency,la
         seller_bank_name='K&H Bank',seller_bank_account='HU61-TEST',
         invoice_prefix='E-ECS',comment='Service period: 2026-10-01 - 2026-10-31')
     payload['customer']['name']='Árvíztűrő & <Partner> "Kft."'
+    recipients = [f'billing-{index}@example.test' for index in range(15)]
+    payload['customer']['email'] = ', '.join([*recipients, recipients[0].upper()])
     schema=Path(__file__).parent/'fixtures/szamlazz/xmlszamla.xsd'
     xml=SzamlazzHuProvider('dummy-key').build_invoice_xml(InvoiceCreateRequest.model_validate(payload))
     result=subprocess.run(['xmllint','--noout','--nonet','--schema',str(schema),'-'],input=xml,capture_output=True)
     assert result.returncode==0,result.stderr.decode()
     root=ElementTree.fromstring(xml)
     assert find_text(root,'nev')==payload['customer']['name']
+    assert find_text(root,'email') == ','.join(recipients)
     assert find_text(root,'arfolyamBank')==('MNB' if currency!='HUF' else None)
 
 

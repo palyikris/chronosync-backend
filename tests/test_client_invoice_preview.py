@@ -95,10 +95,13 @@ async def build_from_profile(profile, quantity=Decimal("1")):
 
 
 def test_project_preview_preserves_recipient_and_never_emails():
-    invoice, client_code = asyncio.run(build_from_profile(billing_profile(net_unit_price="999999")))
+    invoice, client_code = asyncio.run(build_from_profile(billing_profile(
+        net_unit_price="999999", billing_email="billing@example.test, finance@example.test",
+    )))
     assert client_code == "MINTA"
     assert invoice.customer.name == "Minta Kft."
     assert invoice.customer.group_tax_number == "17781228-5-44"
+    assert invoice.customer.email == "billing@example.test,finance@example.test"
     assert invoice.customer.send_email is False
     assert invoice.items[0].quantity == Decimal("1")
     assert invoice.items[0].net_unit_price == Decimal("250000")

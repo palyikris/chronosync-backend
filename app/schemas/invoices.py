@@ -112,12 +112,27 @@ class InvoiceCustomer(InvoiceTextModel):
     postal_code: str = Field(min_length=1, max_length=32)
     city: str = Field(min_length=1, max_length=120)
     address: str = Field(min_length=1, max_length=255)
-    email: str | None = Field(default=None, max_length=255)
+    email: str | None = None
     send_email: bool = False
     tax_subject: Literal[-1, 0, 1, 6, 7] = 0
     tax_number: str | None = Field(default=None, max_length=32)
     eu_tax_number: str | None = Field(default=None, max_length=32)
     group_tax_number: str | None = Field(default=None, max_length=32)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_recipient_emails(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        addresses = [address.strip() for address in value.split(",")]
+        if any(len(address) > 255 or not re.fullmatch(
+            r'[^\s<>@,;:"()\\]+@[^\s<>@,;:"()\\]+\.[^\s<>@,;:"()\\]+', address
+        ) for address in addresses):
+            raise ValueError("email must contain valid comma-separated addresses")
+        unique: dict[str, str] = {}
+        for address in addresses:
+            unique.setdefault(address.lower(), address)
+        return ",".join(unique.values())
 
     @model_validator(mode="after")
     def require_email_when_sending(self) -> Self:
